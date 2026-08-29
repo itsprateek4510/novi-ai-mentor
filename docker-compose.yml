@@ -1,0 +1,51 @@
+services:
+  letta:
+    image: letta/letta:latest
+    container_name: novi_letta
+    ports:
+      - "8283:8283"
+    environment:
+      - LETTA_PG_URI=postgresql://novi_user:novi_password_2024@letta_db:5432/letta
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
+    volumes:
+      - letta_data:/root/.letta
+    depends_on:
+      letta_db:
+        condition: service_healthy
+    networks:
+      - novi_network
+
+  letta_db:
+    image: pgvector/pgvector:pg16
+    container_name: novi_letta_db
+    environment:
+      POSTGRES_USER: novi_user
+      POSTGRES_PASSWORD: novi_password_2024
+      POSTGRES_DB: letta
+    volumes:
+      - letta_pg_data:/var/lib/postgresql/data
+      - ./pg_init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U novi_user -d letta"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - novi_network
+
+  redis:
+    image: redis:alpine
+    container_name: novi_redis
+    ports:
+      - "6379:6379"
+    networks:
+      - novi_network
+
+volumes:
+  letta_data:
+  letta_pg_data:
+
+networks:
+  novi_network:
+    driver: bridge

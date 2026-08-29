@@ -1,0 +1,32 @@
+# Environment / secrets - NEVER commit
+.env
+backend/.env
+*.env
+*.env.local
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Runtime logs
+*.log
+/tmp/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Docker / local data
+data/
+pgdata/
