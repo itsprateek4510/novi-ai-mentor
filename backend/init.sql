@@ -1,6 +1,6 @@
 -- NOVI Database Schema
-
 CREATE DATABASE IF NOT EXISTS novi_db;
+
 USE novi_db;
 
 -- Users table (students)

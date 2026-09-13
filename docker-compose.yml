@@ -8,6 +8,9 @@ services:
       - LETTA_PG_URI=postgresql://novi_user:novi_password_2024@letta_db:5432/letta
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
+      - SECURE=true
+      - LETTA_SERVER_PASSWORD=${LETTA_SERVER_PASSWORD}
+      - LETTA_ENCRYPTION_KEY=dummy-encryption-key-32-chars-long!!
     volumes:
       - letta_data:/root/.letta
     depends_on:

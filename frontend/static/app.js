@@ -1,421 +1,1489 @@
-// NOVI Chat Application
+/* NOVI — student & parent SPA */
+"use strict";
 
-// State
-let currentUser = null;
-let currentConversation = null;
-let conversations = [];
-let currentView = 'chat';
+const API = "/api/v1";
+const state = { token: localStorage.getItem("novi_token") || null, user: JSON.parse(localStorage.getItem("novi_user") || "null") },
+      view = document.getElementById("view"),
+      loader = document.getElementById("loader"),
+      appEl = document.getElementById("app"),
+      topbar = document.getElementById("topbar"),
+      nav = document.getElementById("nav"),
+      showLoader = (b) => loader.classList.toggle("hidden", !b);
 
-// API Configuration
-const API_BASE = window.location.origin;
+/* ---------------------------------------------------------------- helpers */
+function esc(s) { return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 
-// DOM Elements
-const chatMessages = document.getElementById('chatMessages');
-const messageInput = document.getElementById('messageInput');
-const sendBtn = document.getElementById('sendBtn');
-const welcomeScreen = document.getElementById('welcomeScreen');
-const conversationsList = document.getElementById('conversationsList');
-const authModal = document.getElementById('authModal');
-
-// Initialize
-document.addEventListener('DOMContentLoaded', () => {
-    const storedUser = localStorage.getItem('novi_user');
-    if (storedUser) {
-        currentUser = JSON.parse(storedUser);
-        hideAuthModal();
-        loadConversations();
-    } else {
-        showAuthModal();
-    }
-    
-    document.getElementById('loginForm').addEventListener('submit', handleLogin);
-    document.getElementById('signupForm').addEventListener('submit', handleSignup);
-});
-
-// Auth Functions
-function showAuthModal() {
-    authModal.classList.remove('hidden');
+async function api(path, opts = {}) {
+  const headers = { "Content-Type": "application/json" };
+  if (state.token) headers.Authorization = `Bearer ${state.token}`;
+  const res = await fetch(API + path, { ...opts, headers });
+  let data = null;
+  try { data = await res.json(); } catch (_) {}
+  if (!res.ok) { const msg = data && data.detail ? data.detail : `Request failed (${res.status})`; throw new Error(msg); }
+  return data;
 }
 
-function hideAuthModal() {
-    authModal.classList.add('hidden');
-    updateUserUI();
+const star = (n) => "★".repeat(n) + "☆".repeat(5 - n);
+const pill = (label, tone) => `<span class="pill ${tone}">${label}</span>`;
+const MOODS = { great: "😄", good: "🙂", okay: "😕", low: "😞" };
+const moodIcon = (m) => MOODS[m] || "🙂";
+function ringColor(v) { return v >= 70 ? "var(--good)" : v >= 40 ? "var(--warn)" : "var(--bad)"; }
+function emptyState(title, sub = "") { return `<div class="card"><h3>${esc(title)}</h3>${sub ? `<p class="mt small">${sub}</p>` : ""}</div>`; }
+function kicker(text) { return `<div class="kicker">${esc(text)}</div>`; }
+function bellTime() { const h = new Date().getHours(); return h < 12 ? "morning" : h < 17 ? "afternoon" : "evening"; }
+function initials(name) {
+  const p = String(name || "NOVI").trim().split(/\s+/).filter(Boolean);
+  return (p[0]?.[0] || "N").toUpperCase() + (p[1]?.[0] || "").toUpperCase();
 }
 
-function switchTab(tab) {
-    const tabs = document.querySelectorAll('.tab');
-    tabs.forEach(t => t.classList.remove('active'));
-    
-    const forms = document.querySelectorAll('.auth-form');
-    forms.forEach(f => f.style.display = 'none');
-    
-    if (tab === 'login') {
-        tabs[0].classList.add('active');
-        document.getElementById('loginForm').style.display = 'flex';
-    } else {
-        tabs[1].classList.add('active');
-        document.getElementById('signupForm').style.display = 'flex';
-    }
+/* ring chart (svg donut) */
+function ringHTML(pct, label = "", size = 56) {
+  const r = (size - 8) / 2, c = 2 * Math.PI * r, off = c * (1 - Math.min(100, Math.max(0, pct)) / 100);
+  return `<div class="ring-w" style="width:${size}px;height:${size}px">
+    <svg width="${size}" height="${size}">
+      <circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="rgba(255,255,255,0.07)" stroke-width="7"/>
+      <circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="url(#ringGrad)" stroke-width="7" stroke-linecap="round"
+        stroke-dasharray="${c.toFixed(1)}" stroke-dashoffset="${off.toFixed(1)}" style="transition:stroke-dashoffset .8s cubic-bezier(.16,1,.3,1)"/>
+      <defs><linearGradient id="ringGrad" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#8b6cff"/><stop offset="1" stop-color="#4ac7f0"/>
+      </linearGradient></defs>
+    </svg>
+    <span class="ring-val" style="color:${ringColor(pct)}">${label || Math.round(pct) + "%"}</span>
+  </div>`;
 }
 
-async function handleLogin(e) {
+/* ---------------------------------------------------------------- toasts */
+let _toastWrap = null;
+function toast(msg, tone = "ok") {
+  if (!_toastWrap) { _toastWrap = document.createElement("div"); _toastWrap.className = "toasts"; document.body.appendChild(_toastWrap); }
+  const icons = { ok: "✓", err: "⚠", info: "✦" };
+  const el = document.createElement("div");
+  el.className = `toast ${tone}`;
+  el.innerHTML = `<span class="t-ico">${icons[tone] || icons.ok}</span><span>${esc(msg)}</span>`;
+  _toastWrap.appendChild(el);
+  setTimeout(() => { el.classList.add("out"); setTimeout(() => el.remove(), 300); }, 2800);
+}
+
+/* ---------------------------------------------------------------- view entrance */
+function enterView() {
+  view.classList.remove("loaded");
+  void view.offsetWidth;
+  view.classList.add("loaded");
+}
+
+/* ---------------------------------------------------------------- DNA context bar
+   A professional, always-present reminder that Careers / Universities / Roadmap /
+   Passport / Check-in are grounded in the student's Career DNA. */
+let _dnaCtx = null;
+async function getDnaContext() {
+  try { _dnaCtx = await api("/dna/context"); } catch (_) { _dnaCtx = { filled: false }; }
+  return _dnaCtx;
+}
+
+function dnaBarHTML(c, section) {
+  if (!c || !c.filled) {
+    return `
+      <div class="card novi-box mb">
+        <span class="novi-avatar">N</span>
+        <span>Everything on this page personalises from your Career DNA.</span>
+        <a href="#dna" class="small" style="color:var(--accent)">Set your direction now →</a>
+      </div>`;
+  }
+  const notes = {
+    careers: () => `Novi builds every match and "why this could be you" from your DNA. Your strongest signal right now is <b>${esc(c.top_zone || c.top_interest || "your interests")}</b> — start with the matches ranked highest below.`,
+    universities: () => `The programs below are weighted toward your DNA${c.top_zone ? `, with the strongest alignment in <b>${esc(c.top_zone)}</b>` : ""}${c.subjects && c.subjects.length ? ` and your subjects <b>${esc(c.subjects.slice(0, 3).join(", "))}</b>` : ""}.`,
+    roadmap: () => `Your roadmap and weekly priorities are generated around what matters to you${c.top_goal ? ` — <b>${esc(c.top_goal)}</b>` : ""}. Tick steps off and Novi carries your progress forward.`,
+    passport: () => `Novi reads your passport as proof of your DNA. With your direction at <b>${esc(c.top_zone || c.top_interest || "not set yet")}</b>, the highest-value additions are the ones that prove that story.`,
+    checkin: () => `Novi weighs every check-in against the goals in your DNA${c.goals && c.goals.length ? ` — <b>${esc(c.goals.slice(0, 2).join("</b> and <b>"))}</b>` : ""}.`,
+  };
+  const chips = [];
+  if (c.top_zone) chips.push(`<span class="chip acc">${esc(c.top_zone)}</span>`);
+  (c.career_zones || []).slice(1, 3).forEach((z) => chips.push(`<span class="chip">${esc(z)}</span>`));
+  (c.interests || []).slice(0, 2).forEach((i) => chips.push(`<span class="chip">${esc(i)}</span>`));
+  return `
+    <div class="card novi-box mb">
+      <div class="between">
+        <h3 style="margin:0">Based on your Career DNA</h3>
+        <a href="#dna" class="small" style="color:var(--accent)">View DNA →</a>
+      </div>
+      <p class="small" style="margin-top:8px">${notes[section]()}</p>
+      ${chips.length ? `<div class="row" style="margin-top:10px">${chips.join("")}</div>` : ""}
+    </div>`;
+}
+
+/* ---------------------------------------------------------------- auth flow */
+async function init() {
+  if (!state.token) { renderAuth(); return; }
+  try {
+    const me = await api("/auth/me");
+    state.user = me;
+    localStorage.setItem("novi_user", JSON.stringify(state.user));
+  } catch (_) { logout(); return; }
+  renderShell();
+  dispatch();
+}
+
+function logout() {
+  state.token = null; state.user = null;
+  localStorage.removeItem("novi_token"); localStorage.removeItem("novi_user");
+  renderAuth();
+}
+
+function renderAuth() {
+  topbar.classList.add("hidden");
+  appEl.classList.add("logged-out");
+  const [loginErr, signupErr] = [state._loginErr || "", state._signupErr || ""];
+  delete state._loginErr; delete state._signupErr;
+  const field = (name, label, ph, type = "text", extra = "") => `
+    <div class="field"><label>${label}</label><input name="${name}" type="${type}" placeholder="${ph}" ${extra}></div>`;
+  view.innerHTML = `
+    <div class="auth-wrap">
+      <div class="auth-panel">
+        <div class="auth-hero">
+          <div class="brand-mark">N</div>
+          <h1>Your AI mentor.<br>Your journey.<br>Your future.</h1>
+          <p>The Operating System for Student Success — guiding you from Grade 9 to your dream university.</p>
+        </div>
+
+        <div class="card">
+          <h2>Welcome back</h2>
+          ${loginErr ? `<div class="error-banner">${esc(loginErr)}</div>` : ""}
+          <form data-login-form class="mt">
+            ${field("email", "Email", "you@school.edu", "email")}
+            ${field("password", "Password", "Your password", "password")}
+            <button class="btn" style="width:100%">Log in</button>
+          </form>
+        </div>
+
+        <div class="auth-divider"><span>New here? Create your account</span></div>
+
+        <div class="card">
+          <div class="between"><h2>Create account</h2>
+            <select name="signup-role" class="role-select" style="width:auto">
+              <option value="student">Student</option>
+              <option value="parent">Parent</option>
+            </select>
+          </div>
+          ${signupErr ? `<div class="error-banner mt">${esc(signupErr)}</div>` : ""}
+          <form data-signup-form class="mt">
+            ${field("name", "Full name", "Your name")}
+            <div data-student-only>${field("grade", "Grade", "e.g. 11")}</div>
+            ${field("school", "School", "Your school")}
+            ${field("email", "Email", "you@school.edu", "email")}
+            ${field("password", "Password (6+ chars)", "Create a password", "password")}
+            <button class="btn" style="width:100%">Create account</button>
+          </form>
+        </div>
+      </div>
+    </div>`;
+
+  const roleSel = view.querySelector('select[name="signup-role"]');
+  const toggleGrade = () => {
+    view.querySelectorAll("[data-student-only]").forEach((el) => el.classList.toggle("hidden", roleSel.value !== "student"));
+  };
+  toggleGrade();
+  roleSel.addEventListener("change", toggleGrade);
+
+  view.querySelector("[data-login-form]").addEventListener("submit", async (e) => {
     e.preventDefault();
-    const email = document.getElementById('loginEmail').value;
-    const password = document.getElementById('loginPassword').value;
-    
+    const fd = new FormData(e.target);
+    showLoader(true);
     try {
-        const response = await fetch(`${API_BASE}/api/auth/login`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ email, password })
-        });
-        
-        if (response.ok) {
-            currentUser = await response.json();
-            localStorage.setItem('novi_user', JSON.stringify(currentUser));
-            hideAuthModal();
-            loadConversations();
-        } else {
-            const error = await response.json();
-            alert(error.detail || 'Login failed');
-        }
-    } catch (error) {
-        alert('Connection error. Please try again.');
-    }
-}
+      const res = await api("/auth/login", { method: "POST", body: JSON.stringify({ email: fd.get("email"), password: fd.get("password") }) });
+      state.token = res.access_token; state.user = res.user;
+      localStorage.setItem("novi_token", state.token); localStorage.setItem("novi_user", JSON.stringify(state.user));
+      renderShell(); dispatch();
+    } catch (ex) { state._loginErr = ex.message; renderAuth(); }
+    finally { showLoader(false); }
+  });
 
-async function handleSignup(e) {
+  view.querySelector("[data-signup-form]").addEventListener("submit", async (e) => {
     e.preventDefault();
-    const data = {
-        email: document.getElementById('signupEmail').value,
-        password: document.getElementById('signupPassword').value,
-        first_name: document.getElementById('signupFirstName').value,
-        last_name: document.getElementById('signupLastName').value,
-        grade: parseInt(document.getElementById('signupGrade').value),
-        school: document.getElementById('signupSchool').value
+    const fd = new FormData(e.target);
+    const payload = {
+      name: fd.get("name"),
+      email: fd.get("email"),
+      password: fd.get("password"),
+      role: roleSel.value,
+      school: fd.get("school") || null,
+      grade: fd.get("grade") ? Number(fd.get("grade")) : null,
     };
-    
+    showLoader(true);
     try {
-        const response = await fetch(`${API_BASE}/api/auth/signup`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(data)
-        });
-        
-        if (response.ok) {
-            currentUser = await response.json();
-            localStorage.setItem('novi_user', JSON.stringify(currentUser));
-            hideAuthModal();
-            
-            setTimeout(() => {
-                sendQuickMessage(`Hi Novi! I'm ${currentUser.first_name}, a Grade ${currentUser.grade} student. I'm excited to start this journey!`);
-            }, 500);
-        } else {
-            const error = await response.json();
-            alert(error.detail || 'Signup failed');
-        }
-    } catch (error) {
-        alert('Connection error. Please try again.');
-    }
+      const res = await api("/auth/signup", { method: "POST", body: JSON.stringify(payload) });
+      state.token = res.access_token; state.user = res.user;
+      localStorage.setItem("novi_token", state.token); localStorage.setItem("novi_user", JSON.stringify(state.user));
+      renderShell(); dispatch();
+    } catch (ex) { state._signupErr = ex.message; renderAuth(); }
+    finally { showLoader(false); }
+  });
 }
 
-function updateUserUI() {
-    if (currentUser) {
-        const userName = currentUser.first_name || 'Student';
-        document.querySelector('.user-name').textContent = userName;
-        document.querySelector('.user-avatar').textContent = userName.charAt(0).toUpperCase();
-    }
+/* ---------------------------------------------------------------- shell + router */
+const studentNav = [
+  ["dashboard", "Dashboard"], ["chat", "Chat"], ["dna", "My DNA"],
+  ["careers", "Careers"], ["universities", "Universities"],
+  ["roadmap", "Roadmap"], ["passport", "Passport"], ["checkin", "Check-in"],
+  ["profile", "Profile"],
+];
+const parentNav = [["overview", "Overview"], ["advisor", "Parent Advisor"]];
+const NAV_ICONS = {
+  dashboard: "◈", chat: "💬", dna: "🧬", careers: "🎯", universities: "🎓",
+  roadmap: "🗺️", passport: "🏅", checkin: "✓", profile: "👤",
+  overview: "📊", advisor: "🧠",
+};
+
+function renderShell() {
+  topbar.classList.remove("hidden");
+  appEl.classList.remove("logged-out");
+  nav.innerHTML = "";
+  const items = state.user.role === "parent" ? parentNav : studentNav;
+  for (const [key, label] of items) {
+    const b = document.createElement("button");
+    b.innerHTML = `<span class="nav-ico">${NAV_ICONS[key] || "•"}</span><span>${label}</span>`;
+    b.dataset.route = key;
+    b.addEventListener("click", () => { location.hash = key; });
+    nav.appendChild(b);
+  }
+  const su = document.getElementById("sidebar-user");
+  if (su) {
+    const name = state.user.first_name || state.user.name || state.user.email || "";
+    const grade = state.user.grade ? ` · Grade ${state.user.grade}` : "";
+    su.innerHTML = `<b>${esc(name)}</b>${grade}`;
+  }
 }
 
-// View Switching
-function switchView(view) {
-    currentView = view;
-    
-    document.querySelectorAll('.nav-tab').forEach(tab => tab.classList.remove('active'));
-    event.target.closest('.nav-tab').classList.add('active');
-    
-    const chatView = document.getElementById('chatView');
-    const dashboardView = document.getElementById('dashboardView');
-    const sidebarChatContent = document.getElementById('sidebarChatContent');
-    
-    if (view === 'chat') {
-        chatView.style.display = 'flex';
-        dashboardView.style.display = 'none';
-        sidebarChatContent.style.display = 'block';
-    } else {
-        chatView.style.display = 'none';
-        dashboardView.style.display = 'block';
-        sidebarChatContent.style.display = 'none';
-        loadDashboard();
-    }
+/* ---------------------------------------------------------------- router */
+function dispatch() {
+  if (!state.token) return;
+  const key = (location.hash || "#dashboard").slice(1);
+  const navKey = key.startsWith("career") ? "careers" : key.startsWith("university") ? "universities" : key;
+  nav.querySelectorAll("button").forEach((b) => b.classList.toggle("active", b.dataset.route === navKey));
+  window.scrollTo(0, 0);
+  const routes = state.user.role === "parent"
+    ? { overview: renderOverview, advisor: renderAdvisor }
+    : { dashboard: renderDashboard, chat: renderChat, dna: renderDna, careers: renderCareers, universities: renderUniversities, roadmap: renderRoadmap, passport: renderPassport, checkin: renderCheckin, profile: renderProfile };
+  if (key.startsWith("career/")) return detailRoute((s) => renderCareerDetail(s), undefined);
+  if (key.startsWith("university/")) return detailRoute((s) => renderUniversityDetail(s), undefined);
+  const fn = routes[key];
+  if (fn) fn(); else routes[allowedFirst()]();
+  enterView();
 }
+function detailRoute(f, arg) { f(arg); enterView(); }
+function allowedFirst() { return state.user.role === "parent" ? "overview" : "dashboard"; }
 
-// Conversation Functions
-async function loadConversations() {
-    if (!currentUser) return;
-    
+window.addEventListener("hashchange", () => state.token && dispatch());
+
+/* ---------------------------------------------------------------- profile */
+async function renderProfile() {
+  const u = state.user;
+  showLoader(true); view.innerHTML = "";
+  let updated = state._profileMsg || ""; delete state._profileMsg;
+  view.innerHTML = `
+    <div class="hero"><h1>My Profile</h1><p>Your account details — used to personalize every part of NOVI.</p></div>
+    <div class="cols">
+      <div class="card">
+        ${updated ? `<div class="card novi-box mb" style="padding:12px 16px"><span class="novi-avatar">N</span>${esc(updated)}</div>` : ""}
+        <h2>Update details</h2>
+        <div class="field mt"><label>Email</label><input value="${esc(u.email || "")}" disabled></div>
+        <div class="field"><label>Role</label><input value="${esc(u.role || "")}" disabled></div>
+        <div class="field"><label>Name</label><input id="pf-name" value="${esc(u.first_name || u.name || "")}"></div>
+        ${u.role === "student" ? `
+        <div class="field"><label>Grade</label><input id="pf-grade" type="number" min="9" max="12" value="${u.grade || ""}"></div>
+        <div class="field"><label>School</label><input id="pf-school" value="${esc(u.school || "")}"></div>` : ""}
+        <button class="btn" id="pf-save">Save changes</button>
+      </div>
+      <div class="card">
+        <h2>How this helps</h2>
+        <ul class="plain mt">
+          <li>NOVI remembers your grade, school and interests to give age-appropriate advice.</li>
+          <li>Your Career DNA powers all career matching and roadmaps.</li>
+          <li>Your parents can follow your progress if you're linked.</li>
+          <li>Weekly check-ins tune your mentors' focus areas.</li>
+        </ul>
+        <button class="btn-ghost mt" id="pf-reset">Refresh my full profile</button>
+      </div>
+    </div>`;
+  view.querySelector("#pf-save").addEventListener("click", async () => {
+    showLoader(true);
     try {
-        const response = await fetch(`${API_BASE}/api/conversations/${currentUser.id}`);
-        if (response.ok) {
-            conversations = await response.json();
-            renderConversations();
-        }
-    } catch (error) {
-        console.error('Error loading conversations:', error);
-    }
+      const payload = { first_name: view.querySelector("#pf-name").value.trim() };
+      if (view.querySelector("#pf-grade")) payload.grade = view.querySelector("#pf-grade").value ? Number(view.querySelector("#pf-grade").value) : null;
+      if (view.querySelector("#pf-school")) payload.school = view.querySelector("#pf-school").value;
+      const me = await api("/auth/me", { method: "PATCH", body: JSON.stringify(payload) });
+      state.user = me; localStorage.setItem("novi_user", JSON.stringify(state.user));
+      state._profileMsg = "Profile saved ✨";
+      location.hash = "profile"; renderProfile();
+    } catch (ex) { toast(ex.message); }
+    finally { showLoader(false); }
+  });
+  view.querySelector("#pf-reset").addEventListener("click", async () => {
+    showLoader(true);
+    try { const me = await api("/auth/me"); state.user = me; localStorage.setItem("novi_user", JSON.stringify(state.user)); toast("Profile refreshed ✓"); renderProfile(); }
+    catch (ex) { toast(ex.message); }
+    finally { showLoader(false); }
+  });
+  showLoader(false);
 }
 
-function renderConversations() {
-    conversationsList.innerHTML = conversations.map(conv => `
-        <div class="conversation-item ${currentConversation?.id === conv.id ? 'active' : ''}" 
-             onclick="loadConversation(${conv.id})">
-            <div class="conversation-title">${conv.title || 'New Chat'}</div>
-            <div class="conversation-time">${formatTime(conv.updated_at)}</div>
+/* ---------------------------------------------------------------- dashboard */
+async function renderDashboard() {
+  showLoader(true); view.innerHTML = "";
+  try {
+    const d = await api("/dashboard");
+    const p = d.progress || {};
+    const num = (v) => (typeof v === "number" ? Math.round(v) : typeof v === "string" ? v : "—");
+    const pct = (v) => (typeof v === "number" ? `${Math.round(v)}%` : v === undefined || v === null ? "—" : `${v}%`);
+    const firstName = (state.user.first_name || state.user.name || "there").split(" ")[0];
+    const activeGoals = (d.goals || []).filter((g) => g.status === "active");
+    const steps = d.roadmap_items || [];
+    const stepsDone = steps.filter((i) => i.completed).length;
+    const prios = d.priorities || [];
+    const prioOpen = prios.filter((x) => !x.completed);
+    const passportScore = Math.round((d.passport_completion || {}).score || 0);
+    const topCareer = (d.career_matches || [])[0];
+    const dir = p.career_direction || "Exploring";
+    const dirTone = dir === "On Track" ? "good" : dir === "Exploring" ? "warn" : "bad";
+    const dirColor = dirTone === "good" ? "var(--good)" : dirTone === "warn" ? "var(--warn)" : "var(--bad)";
+    const prof = typeof p.profile_strength === "number" ? Math.round(p.profile_strength) : 0;
+    const uni = num(p.university_readiness);
+    const rm = num(p.roadmap_progress);
+    const passSugg = (d.passport_completion && d.passport_completion.suggested_next) ? ` · ${String(d.passport_completion.suggested_next).toLowerCase()}` : "";
+
+    const doAction =
+      d.next_task ? { kind: "task", id: d.next_task.id, label: d.next_task.title }
+      : prioOpen[0] ? { kind: "priority", id: prioOpen[0].id, label: prioOpen[0].title }
+      : null;
+
+    const getOb = async () => { try { return await api("/onboarding"); } catch (_) { return null; } };
+    const ob = await getOb();
+    const journeyDone = ob && !ob.next_action;
+
+    const mini = (icon, title, line, btn, route) => `
+      <div class="mini-card">
+        <span class="sm-ico">${icon}</span>
+        <h3>${title}</h3>
+        <div class="mini-line">${line}</div>
+        <button class="btn-ghost small mt" data-go="${route}">Open ${btn} →</button>
+      </div>`;
+
+    view.innerHTML = `
+      <div class="hero dash-hero">
+        ${kicker(`Good ${bellTime()}, ${esc(firstName)}`)}
+        <h1>${esc(firstName)}, here's how you're <span class="grad">growing</span></h1>
+        <p>One glance at where you are — and one clear next move.</p>
+        <button class="btn hero-chat" id="dash-chat">💬 Chat with Novi</button>
+      </div>
+
+      <div class="dash-crown">
+        <div class="dash-mom">
+          ${ringHTML(prof, `${prof}%`, 92)}
+          <div>
+            <div class="kicker" style="margin:0">your momentum</div>
+            <h2 style="color:${dirColor}">${esc(dir)}</h2>
+            <p class="small muted" style="margin-top:3px">${activeGoals.length ? `Chasing <b>${esc(activeGoals[0].title)}</b>${activeGoals.length > 1 ? ` +${activeGoals.length - 1} more goal${activeGoals.length > 2 ? "s" : ""}` : ""} dream` : "Set your first goal to light the map"}</p>
+          </div>
         </div>
-    `).join('');
-}
-
-async function loadConversation(conversationId) {
-    try {
-        const response = await fetch(`${API_BASE}/api/conversations/${conversationId}/messages`);
-        if (response.ok) {
-            const messages = await response.json();
-            currentConversation = conversations.find(c => c.id === conversationId);
-            
-            welcomeScreen.style.display = 'none';
-            chatMessages.style.display = 'flex';
-            chatMessages.innerHTML = '';
-            
-            messages.forEach(msg => {
-                addMessageToUI(msg.role, msg.content, new Date(msg.created_at));
-            });
-            
-            renderConversations();
-        }
-    } catch (error) {
-        console.error('Error loading conversation:', error);
-    }
-}
-
-function startNewConversation() {
-    currentConversation = null;
-    welcomeScreen.style.display = 'flex';
-    chatMessages.style.display = 'none';
-    chatMessages.innerHTML = '';
-    renderConversations();
-}
-
-// Message Functions
-async function sendMessage() {
-    const message = messageInput.value.trim();
-    if (!message || !currentUser) return;
-    
-    welcomeScreen.style.display = 'none';
-    chatMessages.style.display = 'flex';
-    
-    addMessageToUI('user', message);
-    messageInput.value = '';
-    
-    const typingDiv = showTypingIndicator();
-    
-    try {
-        const response = await fetch(`${API_BASE}/api/chat`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                message: message,
-                user_id: currentUser.id,
-                conversation_id: currentConversation?.id
-            })
-        });
-        
-        typingDiv.remove();
-        
-        if (response.ok) {
-            const data = await response.json();
-            addMessageToUI('assistant', data.message);
-            
-            if (!currentConversation) {
-                currentConversation = { id: data.conversation_id };
-                loadConversations();
-            }
-        } else {
-            addMessageToUI('assistant', 'Sorry, I encountered an error. Please try again.');
-        }
-    } catch (error) {
-        typingDiv.remove();
-        addMessageToUI('assistant', 'Connection error. Please check if the server is running.');
-    }
-}
-
-function sendQuickMessage(message) {
-    messageInput.value = message;
-    sendMessage();
-}
-
-function addMessageToUI(role, content, timestamp = null) {
-    const messageDiv = document.createElement('div');
-    messageDiv.className = `message ${role}`;
-    
-    const avatar = role === 'user' ? 
-        (currentUser?.first_name?.charAt(0) || 'S') : 'N';
-    
-    messageDiv.innerHTML = `
-        <div class="message-avatar">${avatar}</div>
-        <div class="message-content">
-            <div class="message-text">${formatMessage(content)}</div>
-            <div class="message-time">${formatTime(timestamp || new Date())}</div>
+        <div class="dash-chips">
+          <div class="chip-big"><span class="cb-ico">🎯</span><div><b style="color:${dirColor}">${esc(dir)}</b><span>direction</span></div></div>
+          <div class="chip-big"><span class="cb-ico">🎓</span><div><b style="color:${ringColor(uni)}">${pct(p.university_readiness)}</b><span>university ready</span></div></div>
+          <div class="chip-big"><span class="cb-ico">🗺️</span><div><b style="color:${ringColor(rm)}">${pct(p.roadmap_progress)}</b><span>roadmap done</span></div></div>
+          <div class="chip-big"><span class="cb-ico">🏅</span><div><b style="color:${ringColor(passportScore)}">${passportScore}%</b><span>passport proof</span></div></div>
         </div>
-    `;
-    
-    chatMessages.appendChild(messageDiv);
-    chatMessages.scrollTop = chatMessages.scrollHeight;
-}
+      </div>
 
-function showTypingIndicator() {
-    const typingDiv = document.createElement('div');
-    typingDiv.className = 'message assistant';
-    typingDiv.innerHTML = `
-        <div class="message-avatar">N</div>
-        <div class="typing-indicator">
-            <div class="typing-dot"></div>
-            <div class="typing-dot"></div>
-            <div class="typing-dot"></div>
-        </div>
-    `;
-    chatMessages.appendChild(typingDiv);
-    chatMessages.scrollTop = chatMessages.scrollHeight;
-    return typingDiv;
-}
+      ${ob && !journeyDone ? `
+        <div class="card slim-card">
+          <div class="between"><h3>Your journey <span class="muted small">${ob.done}/${ob.total} steps</span></h3>
+            <button class="btn mt" id="journey-next">${esc(ob.next_action ? ob.next_action.label : "Continue")} →</button></div>
+          <div class="progress-track mt"><div class="progress-fill" style="width:${ob.percent}%"></div></div>
+        </div>` : ""}
 
-// Dashboard Functions
-async function loadDashboard() {
-    if (!currentUser) return;
-    
-    try {
-        const response = await fetch(`${API_BASE}/api/user/${currentUser.id}/dashboard`);
-        if (response.ok) {
-            const data = await response.json();
-            renderDashboard(data);
-        }
-    } catch (error) {
-        console.error('Error loading dashboard:', error);
-    }
-}
-
-function renderDashboard(data) {
-    // Stats
-    document.getElementById('statMessages').textContent = data.stats?.total_messages || 0;
-    document.getElementById('statConversations').textContent = data.stats?.total_conversations || 0;
-    document.getElementById('statGoals').textContent = data.goals?.length || 0;
-    document.getElementById('statInterests').textContent = data.career_dna?.interests?.length || 0;
-    
-    // Career DNA - Interests
-    const dnaGrid = document.getElementById('careerDnaGrid');
-    const interests = data.career_dna?.interests || [];
-    const strengths = data.career_dna?.strengths || [];
-    const careerZones = data.career_dna?.career_zones || [];
-    
-    if (interests.length || strengths.length || careerZones.length) {
-        const icons = ['💡', '⚡', '🌟', '🎨', '🔬', '📐', '🎵', '💪', '🎯', '🚀'];
-        let html = '';
-        
-        interests.forEach((item, i) => {
-            html += `<div class="dna-tag"><span class="tag-icon">${icons[i % icons.length]}</span>${item}</div>`;
-        });
-        strengths.forEach((item, i) => {
-            html += `<div class="dna-tag"><span class="tag-icon">💪</span>${item}</div>`;
-        });
-        careerZones.forEach((item, i) => {
-            html += `<div class="dna-tag"><span class="tag-icon">🏢</span>${item}</div>`;
-        });
-        
-        dnaGrid.innerHTML = html;
-    } else {
-        dnaGrid.innerHTML = '<div class="dna-empty">Start chatting with Novi to build your Career DNA!</div>';
-    }
-    
-    // Traits
-    const traitsContainer = document.getElementById('traitsContainer');
-    const traits = data.career_dna?.traits || {};
-    
-    if (Object.keys(traits).length) {
-        let html = '';
-        for (const [trait, value] of Object.entries(traits)) {
-            const pct = Math.round(value * 100);
-            html += `
-                <div class="trait-row">
-                    <div class="trait-name">${trait.replace(/_/g, ' ')}</div>
-                    <div class="trait-bar-bg"><div class="trait-bar" style="width: ${pct}%"></div></div>
-                    <div class="trait-value">${pct}%</div>
-                </div>`;
-        }
-        traitsContainer.innerHTML = html;
-    } else {
-        traitsContainer.innerHTML = '<div class="dna-empty">Traits will appear as you chat more</div>';
-    }
-    
-    // Goals
-    const goalsList = document.getElementById('goalsList');
-    const goals = data.goals || [];
-    
-    if (goals.length) {
-        const catColors = { academic: '#22c55e', career: '#6366f1', personal: '#f59e0b', extracurricular: '#ec4899' };
-        goalsList.innerHTML = goals.map(g => `
-            <div class="goal-item">
-                <div class="goal-dot" style="background: ${catColors[g.category] || '#6366f1'}"></div>
-                <div class="goal-title">${g.title}</div>
-                <div class="goal-category">${g.category}</div>
+      ${d.today_focus ? `
+        <div class="do-card">
+          <div class="do-left"><span class="do-ico">🎯</span>
+            <div>
+              <div class="do-label">DO TODAY</div>
+              <h2>${esc(d.today_focus.title)}</h2>
+              <p class="small muted">${esc(d.today_focus.why || "")}</p>
             </div>
-        `).join('');
-    } else {
-        goalsList.innerHTML = '<div class="dna-empty">Goals will be created as you discuss them with Novi</div>';
-    }
-    
-    // Letta Memory
-    const memoryDisplay = document.getElementById('lettaMemoryDisplay');
-    const memory = data.letta_memory || {};
-    
-    if (Object.keys(memory).length) {
-        memoryDisplay.innerHTML = Object.entries(memory).map(([label, value]) => `
-            <div class="memory-block">
-                <div class="memory-label">${label}</div>
-                <div class="memory-value">${value}</div>
+          </div>
+          <div class="do-right">
+            ${doAction ? `<button class="btn" id="do-done">✓ Mark done</button>` : `<button class="btn-ghost" id="dash-chat2">💬 Ask Novi</button>`}
+          </div>
+        </div>` : ""}
+
+      <div class="mini-cards">
+        ${mini(activeGoals.length ? "🗺️" : "🎯", "Goals & roadmap", activeGoals.length ? `<b>${stepsDone}/${steps.length}</b> steps done across ${activeGoals.length} active goal${activeGoals.length > 1 ? "s" : ""}` : "No active goals yet — start your map", "Roadmap", "roadmap")}
+        ${mini("💼", "Top career", topCareer ? `<b>${esc(topCareer.career.emoji || "🎯")} ${esc(topCareer.career.title)}</b> · <span style="color:${ringColor(topCareer.score)}">${Math.round(topCareer.score)}% match</span>` : "Chat with Novi to discover your path", "Careers", "careers")}
+        ${mini("🏅", "Passport", d.passport_completion ? `<b>${passportScore}%</b> complete${passSugg}` : "Add your first win", "Passport", "passport")}
+        ${mini("📅", "This week", prioOpen.length ? `<b>${(d.priorities || []).length - prioOpen.length}/${(d.priorities || []).length}</b> done · next: ${esc(prioOpen[0].title)}` : "All priorities done. Nice!", "Roadmap", "roadmap")}
+      </div>
+
+      <div class="card novi-strip">
+        <span class="novi-avatar">N</span>
+        <div><p class="small">${esc(d.novi_says || "I'm here whenever you need me — ask me anything about your path.")}</p></div>
+        <button class="btn-ghost" id="dash-chat3">💬 Chat</button>
+      </div>
+
+      <button class="fab" id="dash-fab" title="Chat with Novi">💬 <span>Novi</span></button>`;
+
+    const go = (route) => () => { location.hash = route; };
+    document.querySelectorAll("[data-go]").forEach((el) => el.addEventListener("click", go(el.dataset.go)));
+    ["#dash-chat", "#dash-chat2", "#dash-chat3", "#dash-fab"].forEach((sel) => {
+      const el = view.querySelector(sel); if (el) el.addEventListener("click", () => { location.hash = "chat"; });
+    });
+    const jn = view.querySelector("#journey-next");
+    if (jn) jn.addEventListener("click", () => { location.hash = ob.next_action ? ob.next_action.route : "chat"; });
+    const dd = view.querySelector("#do-done");
+    if (dd) dd.addEventListener("click", async () => {
+      showLoader(true);
+      try {
+        if (doAction.kind === "task") await api(`/roadmap/tasks/${doAction.id}`, { method: "PATCH", body: JSON.stringify({ status: "done" }) });
+        else await api(`/roadmap/priorities/${doAction.id}`, { method: "PATCH" });
+        toast("Nice work — knocked it out ✓"); renderDashboard();
+      } catch (ex) { toast(ex.message); showLoader(false); }
+    });
+  } catch (ex) { view.innerHTML = emptyState("Could not load dashboard", ex.message); }
+  finally { showLoader(false); }
+}
+
+/* ---------------------------------------------------------------- chat */
+let activeConversationId = null, chatHistory = [];
+
+async function renderChat() {
+  showLoader(true); view.innerHTML = "";
+  activeConversationId = null; chatHistory = [];
+  try {
+    const convos = await api("/chat/conversations");
+    view.innerHTML = `
+      <div class="chat-shell">
+        <div class="chat-side">
+          <div class="side-head"><h2>Conversations</h2><button class="btn-ghost" style="padding:7px 12px" id="new-chat">+ New</button></div>
+          <div id="conv-list" class="conv-list"></div>
+        </div>
+        <div class="chat-main">
+          <div class="chat-head">
+            <div class="chat-avatar">N</div>
+            <div><div class="chat-head-name">Novi</div><div class="chat-status">Always remembers your journey</div></div>
+            <div class="spacer"></div>
+            <button class="btn-ghost small" id="new-chat2">New chat</button>
+          </div>
+          <div class="chat-log" id="chat-log"><div class="welcome" id="chat-welcome">
+            <div class="wa brand-mark">N</div>
+            <h2>Hey ${esc((state.user.first_name || state.user.name || "").split(" ")[0] || "there")} 👋</h2>
+            <p>I'm Novi. I've been learning you from your DNA, your check-ins and your journey. Ask me anything.</p>
+            <div class="sugg">
+              <button data-sugg="What career fits my strengths?">What career fits my strengths?</button>
+              <button data-sugg="Which subjects should I focus on?">Which subjects should I focus on?</button>
+              <button data-sugg="What should I be doing this month?">What should I be doing this month?</button>
+              <button data-sugg="Show me universities that fit me.">Show me universities that fit me.</button>
+              <button data-sugg="Help me build a strong profile.">Help me build a strong profile.</button>
             </div>
-        `).join('');
-    } else {
-        memoryDisplay.innerHTML = '<div class="dna-empty">Memory builds as you chat</div>';
+          </div></div>
+          <div class="chat-input">
+            <input id="chat-text" placeholder="Ask Novi anything…" autocomplete="off">
+            <button class="btn chat-send" id="chat-send" title="Send">➤</button>
+          </div>
+        </div>
+      </div>`;
+    const convList = view.querySelector("#conv-list");
+    const fmtAgo = (iso) => {
+      if (!iso) return "";
+      const then = new Date(iso).getTime(), diff = Date.now() - then;
+      if (isNaN(then)) return esc(iso.slice(0, 10));
+      if (diff < 6e4) return "just now";
+      if (diff < 36e5) return Math.floor(diff / 6e4) + "m";
+      if (diff < 864e5) return Math.floor(diff / 36e5) + "h";
+      if (diff < 864e5 * 7) return Math.floor(diff / 864e5) + "d";
+      return esc(String(iso).slice(0, 10));
+    };
+    const renderConvs = (selectId) => {
+      convList.innerHTML = convos.length
+        ? convos.map((c) => `<div class="conv-item ${c.id === selectId ? "active" : ""}" data-cid="${c.id}">
+            <div class="ci-title">${esc(c.title || "New chat")}</div>
+            <div class="ci-sub"><span>${esc((c.last_message || "").slice(0, 42) || "No messages yet")}</span><span>${fmtAgo(c.updated_at)}</span></div></div>`).join("")
+        : `<div class="muted small" style="padding:8px 12px">No conversations yet — say hi below.</div>`;
+    };
+    renderConvs(null);
+    convList.addEventListener("click", (e) => {
+      const el = e.target.closest("[data-cid]"); if (!el) return;
+      loadConversation(Number(el.dataset.cid));
+    });
+    if (convos.length) {
+      const latest = convos[0];
+      renderConvs(latest.id);
+      loadConversation(latest.id);
     }
+    const reset = () => { activeConversationId = null; chatHistory = []; window.location.hash = "chat"; renderChat(); };
+    view.querySelector("#new-chat").addEventListener("click", reset);
+    view.querySelector("#new-chat2").addEventListener("click", reset);
+    view.querySelector("#chat-send").addEventListener("click", sendChat);
+    view.querySelector("#chat-text").addEventListener("keydown", (e) => { if (e.key === "Enter") sendChat(); });
+    view.querySelectorAll("[data-sugg]").forEach((b) => b.addEventListener("click", () => {
+      const inp = view.querySelector("#chat-text");
+      inp.value = b.dataset.sugg;
+      inp.focus();
+      sendChat();
+    }));
+    showLoader(false);
+  } catch (ex) { view.innerHTML = emptyState("Chat unavailable", ex.message); showLoader(false); }
 }
 
-// Utility Functions
-function formatMessage(content) {
-    return content
-        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-        .replace(/\*(.*?)\*/g, '<em>$1</em>')
-        .replace(/\n/g, '<br>');
+async function loadConversation(cid) {
+  activeConversationId = cid;
+  document.querySelectorAll(".conv-item").forEach((el) => el.classList.toggle("active", Number(el.dataset.cid) === cid));
+  const msgs = await api(`/chat/conversations/${cid}/messages`);
+  chatHistory = msgs;
+  renderMessages();
 }
 
-function formatTime(date) {
-    if (!date) return '';
-    const d = new Date(date);
-    const now = new Date();
-    const diff = now - d;
-    
-    if (diff < 60000) return 'Just now';
-    if (diff < 3600000) return `${Math.floor(diff/60000)}m ago`;
-    if (diff < 86400000) return `${Math.floor(diff/3600000)}h ago`;
-    return d.toLocaleDateString();
+function msgTime(m) {
+  const t = m.created_at || m.createdAt || m.timestamp;
+  if (!t) return "";
+  const d = new Date(t);
+  return isNaN(d) ? "" : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-function handleKeyDown(e) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        sendMessage();
+function renderMessages() {
+  const log = document.querySelector("#chat-log"); if (!log) return;
+  const userName = (state.user.first_name || state.user.name || "You") + "";
+  log.innerHTML = chatHistory.length ? chatHistory.map((m) => {
+    const tm = msgTime(m);
+    if (m.role === "user") return `<div class="chat-row user"><div class="chat-avatar">${esc(initials(userName))}</div><div class="bubble">${esc(m.content)}${tm ? `<span class="meta">${tm}</span>` : ""}</div></div>`;
+    return `<div class="chat-row novi"><div class="chat-avatar">N</div><div class="bubble">${esc(m.content)}${tm ? `<span class="meta">${tm}</span>` : ""}</div></div>`;
+  }).join("") : `<div class="welcome"><div class="wa brand-mark">N</div><h2>Hey 👋</h2><p>This conversation is empty. Ask Novi anything.</p></div>`;
+  log.scrollTop = log.scrollHeight;
+}
+
+async function sendChat() {
+  const inp = document.querySelector("#chat-text"); if (!inp) return;
+  const text = inp.value.trim(); if (!text) return;
+  inp.value = "";
+  chatHistory.push({ role: "user", content: text });
+  renderMessages();
+  const log = document.querySelector("#chat-log");
+  log.insertAdjacentHTML("beforeend", `<div class="chat-row novi"><div class="chat-avatar">N</div><div class="bubble"><span class="typing"><i></i><i></i><i></i></span></div></div>`);
+  log.scrollTop = log.scrollHeight;
+  try {
+    const res = await api("/chat", { method: "POST", body: JSON.stringify({ message: text, conversation_id: activeConversationId }) });
+    activeConversationId = res.conversation_id;
+    chatHistory.push({ role: "assistant", content: res.message, created_at: new Date().toISOString() });
+    renderMessages();
+    const convos = await api("/chat/conversations");
+    const list = document.querySelector("#conv-list");
+    if (list) {
+      const cur = convos.find((c) => c.id === activeConversationId);
+      list.innerHTML = convos.map((c) => `<div class="conv-item ${c.id === activeConversationId ? "active" : ""}" data-cid="${c.id}">
+        <div class="ci-title">${esc(c.title || "New chat")}</div>
+        <div class="ci-sub"><span>${esc((c.last_message || (c.id === activeConversationId ? text.slice(0, 42) : "") || "No messages yet"))}</span><span>${c.id === activeConversationId ? "now" : ""}</span></div></div>`).join("");
     }
+  } catch (ex) { chatHistory.push({ role: "assistant", content: "⚠️ " + ex.message }); renderMessages(); }
 }
 
-messageInput.addEventListener('input', function() {
-    this.style.height = 'auto';
-    this.style.height = Math.min(this.scrollHeight, 150) + 'px';
-});
+/* ---------------------------------------------------------------- DNA */
+async function renderDna() {
+  showLoader(true); view.innerHTML = "";
+  try {
+    const dna = await api("/dna");
+    const field = (key, label, ph) => `<div class="field"><label>${label}</label><input data-field="${key}" placeholder="${ph}" value="${esc((dna[key] || []).join(", "))}"></div>`;
+    view.innerHTML = `
+      <div class="hero">${kicker("Your living map")}<h1>My Career DNA</h1><p>The map Novi builds about who you are. Update it, or let Novi refresh it from your chats.</p></div>
+      <div class="card novi-box mb">
+        <h3 class="mb">Novi's reflection</h3>
+        <span class="novi-avatar">N</span><span>${dna.novi_reflection ? esc(dna.novi_reflection) : "Your reflection fills here after you chat about your interests."}</span>
+        <div class="row mt">
+          <button class="btn" id="refl-yes">Yes, that's me ✓</button>
+          <button class="btn-ghost" id="refl-no">Not quite</button>
+        </div>
+      </div>
+      ${dna.dna_filled ? pill("DNA ready", "good") : `<span class="pill">Not yet finalised</span>`}
+      <div class="section-title">Edit DNA</div>
+      <div class="card">
+        ${field("interests", "Interests", "robotics, AI, music…")}
+        ${field("subjects", "Subjects you enjoy", "maths, computer science…")}
+        ${field("strengths", "Strengths", "coding, teamwork…")}
+        ${field("development_areas", "Want to grow in", "public speaking…")}
+        ${field("goals", "Career goals", "build an AI company")}
+        ${field("values", "Values", "creativity, impact…")}
+        <div class="row">
+          <button class="btn" id="save-dna">Save DNA</button>
+          <button class="btn-ghost" id="refresh-dna">Refresh from chats</button>
+          ${!dna.dna_filled ? `<button class="btn-ghost" id="finalize-dna">Finalize DNA ✓</button>` : `<span class="chip acc">DNA locked · ready for matching</span>`}
+        </div>
+      </div>
+      <div class="section-title">Currently mapped</div>
+      <div class="cols">
+        ${[["interests", "Interests"], ["strengths", "Strengths"], ["subjects", "Subjects"], ["goals", "Goals"], ["career_zones", "Career zones"], ["values", "Values"]].map(([k, l]) => `
+          <div class="card"><h3>${l}</h3><div class="dna-tag-row mt">${(dna[k] || []).map((t) => `<span class="chip">${esc(t)}</span>`).join("") || `<span class="muted small">Not set yet</span>`}</div></div>`).join("")}
+      </div>`;
+    view.querySelector("#save-dna").addEventListener("click", async () => {
+      const payload = {};
+      view.querySelectorAll("[data-field]").forEach((inp) => { payload[inp.dataset.field] = inp.value.split(",").map((s) => s.trim()).filter(Boolean); });
+      showLoader(true);
+      try { const updated = await api("/dna", { method: "PATCH", body: JSON.stringify(payload) }); toast("DNA updated ✨"); location.hash = "dna"; renderDna(); }
+      catch (ex) { toast(ex.message); }
+      finally { showLoader(false); }
+    });
+    view.querySelector("#refresh-dna").addEventListener("click", async () => {
+      showLoader(true);
+      try { await api("/dna/refresh", { method: "POST" }); toast("DNA refreshed from your chats 🧬"); location.hash = "dna"; renderDna(); }
+      catch (ex) { toast(ex.message); }
+      finally { showLoader(false); }
+    });
+    const finBtn = view.querySelector("#finalize-dna");
+    if (finBtn) finBtn.addEventListener("click", async () => {
+      showLoader(true);
+      try { await api("/dna/reflect", { method: "POST", body: JSON.stringify({ accepted: true }) }); toast("DNA finalised — you're ready to match 🎯"); location.hash = "dna"; renderDna(); }
+      catch (ex) { toast(ex.message); }
+      finally { showLoader(false); }
+    });
+    const reflYes = view.querySelector("#refl-yes");
+    if (reflYes) reflYes.addEventListener("click", async () => {
+      showLoader(true);
+      try { await api("/dna/reflect", { method: "POST", body: JSON.stringify({ accepted: true }) }); toast("That makes me happy to hear 🎉"); location.hash = "dna"; renderDna(); }
+      catch (ex) { toast(ex.message); }
+      finally { showLoader(false); }
+    });
+    const reflNo = view.querySelector("#refl-no");
+    if (reflNo) reflNo.addEventListener("click", async () => {
+      const feedback = prompt("What feels off? Tell Novi what's more true for you:", "");
+      if (feedback === null) return;
+      showLoader(true);
+      try { await api("/dna/reflect", { method: "POST", body: JSON.stringify({ accepted: false, feedback }) }); toast("Got it — Novi will keep learning 🧬"); location.hash = "dna"; renderDna(); }
+      catch (ex) { toast(ex.message); }
+      finally { showLoader(false); }
+    });
+  } catch (ex) { view.innerHTML = emptyState("DNA unavailable", ex.message); }
+  finally { showLoader(false); }
+}
+
+/* ---------------------------------------------------------------- careers */
+let careerFilter = "";
+async function renderCareers() {
+  showLoader(true); view.innerHTML = "";
+  try {
+    const [dctx, list, categories, savedMatches] = await Promise.all([
+      getDnaContext(), api("/careers?limit=50"), api("/careers/categories"), api("/careers/matches").catch(() => []),
+    ]);
+    const matchMap = {};
+    (savedMatches || []).forEach((m) => { matchMap[m.career.slug] = m.score; });
+    const matchCard = (m, i) => `
+      <div class="list-item mb" style="cursor:pointer" data-m-slug="${esc(m.career.slug)}">
+        <div class="row">
+          <div class="num-badge">${i + 1}</div>
+          <div style="flex:1"><b>${m.career.emoji} ${esc(m.career.title)}</b>
+            <div class="small muted">best fit for your DNA</div></div>
+          <b style="color:${ringColor(m.score)}">${Math.round(m.score)}%</b>
+        </div>
+        <ul class="plain mt">${(m.reasons || []).map((r) => `<li class="small">${esc(r)}</li>`).join("")}</ul>
+      </div>`;
+    view.innerHTML = `
+      <div class="hero">${kicker("Explore verified paths")}<h1>Career Explorer</h1><p>There are thousands of careers you've never heard of. Novi surfaces the ones that could be <b style="color:var(--text)">you</b>.</p></div>
+      ${dnaBarHTML(dctx, "careers")}
+      <div class="card mb">
+        <div class="career-search">
+          <input id="career-q" placeholder="Search careers, interests or skills — try ‘AI’, ‘design’, ‘finance’…">
+          <button class="btn" id="career-match">✨ Match with AI</button>
+        </div>
+        <div class="cat-row">
+          <button class="cat-pill on" data-cat="">All</button>
+          ${(categories || []).map((c) => `<button class="cat-pill" data-cat="${esc(c)}">${esc(c)}</button>`).join("")}
+        </div>
+        <div id="match-result" class="mt">
+          ${(savedMatches || []).length ? `<div class="section-title">Your AI matches</div>${savedMatches.map(matchCard).join("")}` : ""}
+        </div>
+      </div>
+      <div class="career-grid" id="career-grid">
+        ${list.map((c) => `
+          <div class="card career-card" data-slug="${esc(c.slug)}" data-cat-list="${esc(c.category)}">
+            <div class="career-top">
+              <div class="career-emoji">${c.emoji}</div>
+              ${matchMap[c.slug] !== undefined
+                ? `<span class="pill mid" title="AI match score">${Math.round(matchMap[c.slug])}% match</span>`
+                : `<span class="pill" style="background:var(--panel-2);color:var(--muted)">${esc(c.category)}</span>`}
+            </div>
+            <div class="cc-title">${esc(c.title)}</div>
+            <div class="cc-meta">${esc(c.salary_range || c.category)}</div>
+            <p class="cc-summary">${esc(c.summary)}</p>
+            <div class="cc-foot">
+              ${matchMap[c.slug] !== undefined ? `<div class="progress-track"><div class="progress-fill" style="width:${matchMap[c.slug]}%;background:${ringColor(matchMap[c.slug])}"></div></div>` : ""}
+              <span class="small muted">View career →</span>
+            </div>
+          </div>`).join("")}
+      </div>`;
+    const q = view.querySelector("#career-q");
+    const applyFilters = () => {
+      const t = q.value.toLowerCase();
+      const on = view.querySelector(".cat-pill.on");
+      const cat = on ? on.dataset.cat : "";
+      view.querySelectorAll("[data-slug]").forEach((el) => {
+        const inCat = !cat || (el.dataset.catList || "") === cat;
+        const inQuery = !t || el.textContent.toLowerCase().includes(t);
+        el.classList.toggle("hidden", !(inCat && inQuery));
+      });
+    };
+    q.addEventListener("input", applyFilters);
+    view.querySelectorAll(".cat-pill").forEach((b) => b.addEventListener("click", () => {
+      view.querySelectorAll(".cat-pill").forEach((x) => x.classList.remove("on"));
+      b.classList.add("on");
+      applyFilters();
+    }));
+    view.querySelector("#career-grid").addEventListener("click", (e) => {
+      const el = e.target.closest("[data-slug]"); if (el) location.hash = "career/" + el.dataset.slug;
+    });
+    view.querySelector("#match-result").addEventListener("click", (e) => {
+      const el = e.target.closest("[data-m-slug]"); if (el) location.hash = "career/" + el.dataset.mSlug;
+    });
+    view.querySelector("#career-match").addEventListener("click", async () => {
+      showLoader(true);
+      try {
+        const dna = await api("/dna");
+        const res = await api("/careers/match", { method: "POST", body: JSON.stringify({ interests: dna.interests, subjects: dna.subjects, skills: dna.skills }) });
+        document.querySelector("#match-result").innerHTML = `<div class="section-title">Top matches for you</div>` + res.map(matchCard).join("");
+        document.querySelector("#match-result").addEventListener("click", (e) => {
+          const el = e.target.closest("[data-m-slug]"); if (el) location.hash = "career/" + el.dataset.mSlug;
+        });
+      } catch (ex) { toast(ex.message); }
+      finally { showLoader(false); }
+    });
+  } catch (ex) { view.innerHTML = emptyState("Careers unavailable", ex.message); }
+  finally { showLoader(false); }
+}
+
+async function renderCareerDetail() {
+  const slug = location.hash.slice(1).split("/")[1];
+  showLoader(true); view.innerHTML = "";
+  try {
+    const [dctx, c] = await Promise.all([getDnaContext(), api(`/careers/${slug}`)]);
+    const stepIcon = { project: "🛠️", skill: "📈", explore: "🔎" };
+    const chips = (arr, cls = "") => (arr && arr.length ? `<div class="tag-list">${arr.map((s) => `<span class="chip ${cls}">${esc(s)}</span>`).join("")}</div>` : `<p class="small muted">Not mapped yet.</p>`);
+    const facts = [
+      ["Salary range", c.salary_range || "Varies"],
+      ["Career outlook", c.outlook || "—"],
+      ["Degrees that lead here", (c.degrees || []).length ? c.degrees.join(" · ") : "—"],
+      ["Industries", (c.industries || []).length ? c.industries.join(" · ") : "—"],
+    ].filter(([, v]) => v && v !== "—");
+    view.innerHTML = `
+      <div class="hero">
+        <a href="#careers" class="small" style="color:var(--accent)">← All careers</a>
+        ${kicker(esc(c.category))}
+        <h1>${c.emoji} ${esc(c.title)}</h1>
+        <p>${esc(c.summary)}</p>
+        <span class="chip acc" id="fit-chip" style="margin-top:10px;display:none"></span>
+      </div>
+      ${dnaBarHTML(dctx, "careers")}
+      <div id="novi-fit" class="mb">
+        <div class="card novi-box"><span class="novi-avatar">N</span><span class="small muted">Novi is working out how well this fits you…</span></div>
+      </div>
+      <div class="detail-layout">
+        <div class="detail-main">
+          <div class="card">
+            <div class="block-title">What do they actually do?</div>
+            <div class="how-line"><div class="hl-ico">💼</div><p>${esc(c.what_they_do || c.description)}</p></div>
+            ${c.description && c.what_they_do ? `<p class="career-desc mt">${esc(c.description)}</p>` : ""}
+          </div>
+          <div class="fact-grid">
+            ${facts.map(([k, v]) => `<div class="fact"><div class="f-label">${esc(k)}</div><div class="f-value">${esc(v)}</div></div>`).join("")}
+          </div>
+          <div class="card">
+            <div class="block-title">Your next steps</div>
+            <div id="next-steps" class="grid" style="gap:14px"><p class="small muted">Novi is tailoring your next steps…</p></div>
+          </div>
+        </div>
+        <div class="detail-side">
+          <div class="card" id="fit-card">
+            <div class="block-title">Fit for you</div>
+            <p class="small muted">Scored against your Career DNA — interests, subjects, strengths and goals.</p>
+          </div>
+          <div class="card">
+            <div class="block-title">Skills you'll need</div>
+            ${chips(c.skills || [], "acc")}
+            <div class="block-title mt">What should you study?</div>
+            ${chips(c.subjects || [])}
+          </div>
+          <div class="card">
+            <div class="block-title">Degrees that lead here</div>
+            ${chips(c.degrees || [])}
+            <div class="block-title mt">Industries</div>
+            ${chips(c.industries || [])}
+            <div class="block-title mt">Where this could take you</div>
+            ${chips(c.future_paths || [], "acc")}
+          </div>
+        </div>
+      </div>
+    `;
+    showLoader(false);
+    api(`/careers/${slug}/advice`).then((adv) => {
+      if (location.hash !== `#career/${slug}`) return;
+      const chip = view.querySelector("#fit-chip");
+      if (chip && adv.fit_rating) { chip.style.display = ""; chip.innerHTML = `<b>${Math.round(adv.fit_rating)}%</b> fit for you`; }
+      const box = view.querySelector("#novi-fit");
+      if (box && adv.fit_statement) {
+        box.innerHTML = `
+          <div class="card novi-box mb">
+            <h3 class="mb">Why Novi thinks this could be you</h3>
+            <span class="novi-avatar">N</span><span>${esc(adv.fit_statement)}</span>
+            ${(adv.reasons || []).length ? `<ul class="plain mt">${adv.reasons.map((r) => `<li class="small">${esc(r)}</li>`).join("")}</ul>` : ""}
+          </div>`;
+      } else if (box) { box.remove(); }
+      const fitCard = view.querySelector("#fit-card");
+      if (fitCard && adv.fit_rating) {
+        fitCard.innerHTML = `
+          <div class="fit-head"><b>Fit for you</b><b style="color:${ringColor(adv.fit_rating)}">${Math.round(adv.fit_rating)}%</b></div>
+          <div class="progress-track mt"><div class="progress-fill" style="width:${adv.fit_rating}%"></div></div>
+          <p class="small muted mt">Scored against your Career DNA — interests, subjects, strengths and goals.</p>`;
+      }
+      const steps = view.querySelector("#next-steps");
+      if (steps && (adv.next_steps || []).length) {
+        steps.innerHTML = adv.next_steps.map((s) => `
+          <div class="step-card" style="border:1px solid var(--border);background:var(--panel-2);border-radius:14px;padding:16px">
+            <div class="between"><span class="step-icon">${stepIcon[s.type] || "→"}</span><span class="pill mid">${esc(s.type)}</span></div>
+            <h3 class="mt">${esc(s.title)}</h3>
+            <p class="small mt">${esc(s.why)}</p>
+            <button class="btn-ghost mt" data-step-link="${esc(s.link)}">Take this step →</button>
+          </div>`).join("");
+        steps.querySelectorAll("[data-step-link]").forEach((b) => b.addEventListener("click", () => { location.hash = b.dataset.stepLink; }));
+      }
+    }).catch(() => {
+      const box = view.querySelector("#novi-fit"); if (box) box.remove();
+    });
+  } catch (ex) { view.innerHTML = emptyState("Career not found", ex.message); showLoader(false); }
+}
+
+/* ---------------------------------------------------------------- universities */
+async function renderUniversities() {
+  showLoader(true); view.innerHTML = "";
+  try {
+    const [dctx, filters, rows, recommended] = await Promise.all([
+      getDnaContext(), api("/universities/filters"), api("/universities?limit=30"), api("/universities/recommended").catch(() => []),
+    ]);
+    const uniCard = (u) => `
+      <div class="card list-item" style="cursor:pointer" data-slug="${esc(u.slug)}">
+        <div class="between"><h3>${esc(u.name)}</h3><span class="pill mid">#${u.ranking || "—"}</span></div>
+        <p class="small mt">${esc(u.course)} · ${esc(u.country)} · ${esc(u.city)}</p>
+      </div>`;
+    const uniReadinessCard = (m) => `
+      <div class="card list-item" style="cursor:pointer" data-slug="${esc((m.university||{}).slug || "")}">
+        <div class="between"><h3>${esc((m.university||{}).name || "")}</h3><span class="pill mid">#${(m.university||{}).ranking || "—"}</span></div>
+        <div class="row mt"><div class="progress-track" style="flex:1"><div class="progress-fill" style="width:${m.readiness}%;background:${ringColor(m.readiness)}"></div></div><b style="color:${ringColor(m.readiness)}">${Math.round(m.readiness)}%</b></div>
+        ${m.reason ? `<p class="small muted mt">${esc(m.reason)}</p>` : ""}
+      </div>`;
+    const s = async () => {
+      const params = new URLSearchParams({ limit: "30" });
+      const country = document.querySelector("#uni-country").value, subject = document.querySelector("#uni-subject").value;
+      if (country) params.set("country", country); if (subject) params.set("subject", subject);
+      const newRows = await api(`/universities?${params}`);
+      const grid = document.querySelector("#uni-grid");
+      grid.innerHTML = newRows.map(uniCard).join("");
+    };
+    view.innerHTML = `
+      <div class="hero">${kicker("Find your program")}<h1>University Explorer</h1><p>Global programs, weighted to your DNA and your readiness.</p></div>
+      ${dnaBarHTML(dctx, "universities")}
+      ${(recommended || []).length ? `
+        <div class="card mb">
+          <h2>Recommended for you</h2><p class="small muted">Ranked by alignment with your Career DNA</p>
+          <div class="cols mt" style="grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px">
+            ${recommended.map(uniReadinessCard).join("")}
+          </div>
+        </div>` : ""}
+      <div class="card mb">
+        <div class="cols" style="gap:12px">
+          <div class="field" style="margin:0"><label>Country</label><select id="uni-country"><option value="">All</option>${filters.countries.map((c) => `<option>${esc(c)}</option>`).join("")}</select></div>
+          <div class="field" style="margin:0"><label>Subject</label><select id="uni-subject"><option value="">All</option>${filters.subjects.map((c) => `<option>${esc(c)}</option>`).join("")}</select></div>
+        </div>
+      </div>
+      <div class="cols" id="uni-grid">${rows.map(uniCard).join("")}</div>`;
+    view.querySelector("#uni-country").addEventListener("change", s);
+    view.querySelector("#uni-subject").addEventListener("change", s);
+    view.querySelector("#uni-grid").addEventListener("click", (e) => {
+      const el = e.target.closest("[data-slug]"); if (el) location.hash = "university/" + el.dataset.slug;
+    });
+    view.querySelectorAll("[data-slug]").forEach((el) => {
+      if (!el.closest("#uni-grid")) el.addEventListener("click", () => { location.hash = "university/" + el.dataset.slug; });
+    });
+  } catch (ex) { view.innerHTML = emptyState("Universities unavailable", ex.message); }
+  finally { showLoader(false); }
+}
+
+async function renderUniversityDetail() {
+  const slug = location.hash.slice(1).split("/")[1];
+  showLoader(true); view.innerHTML = "";
+  try {
+    const [dctx, u] = await Promise.all([getDnaContext(), api(`/universities/${slug}`)]);
+    view.innerHTML = `
+      <div class="hero"><a href="#universities" class="small" style="color:var(--accent)">← All universities</a><h1 class="mt">${esc(u.name)}</h1><p>${esc(u.city)}, ${esc(u.country)} · <b>${esc(u.course)}</b> · Rank #${u.ranking || "—"}</p></div>
+      ${dnaBarHTML(dctx, "universities")}
+      <div class="cols">
+        <div class="card"><h2>About</h2><p class="mt">${esc(u.about)}</p>
+          <h3 class="mt">Entry requirements</h3><p class="mt small">${esc(u.entry_requirements)}</p></div>
+        <div class="card"><h3>Fast facts</h3>
+          <ul class="plain mt"><li>Type: ${esc(u.university_type)}</li><li>Tuition: ${u.fees_per_year ? "$" + u.fees_per_year.toLocaleString() + " / year" : "Varies"}</li><li>Scholarships: ${u.scholarships ? "Available ✅" : "Limited"}</li></ul>
+          <h3 class="mt">Strengths</h3><ul class="plain">${(u.strengths || []).map((s) => `<li>${esc(s)}</li>`).join("") || `<li class="muted">—</li>`}</ul>
+          <button class="btn mt" id="readiness-btn">Check my readiness</button>
+          <div id="readiness-result" class="mt"></div>
+        </div>
+      </div>`;
+    view.querySelector("#readiness-btn").addEventListener("click", async () => {
+      showLoader(true);
+      try {
+        const r = await api("/universities/readiness", { method: "POST", body: JSON.stringify({ university_id: u.id }) });
+        document.querySelector("#readiness-result").innerHTML = `
+          <div class="card" style="background:var(--panel-2)">
+            <div class="between"><b>Readiness score</b><b style="color:${ringColor(r.readiness)}">${Math.round(r.readiness)}%</b></div>
+            <div class="progress-track mt"><div class="progress-fill" style="width:${r.readiness}%;background:${ringColor(r.readiness)}"></div></div>
+            <div class="small muted mt"><b style="color:var(--text)">Strengths</b><ul class="plain">${(r.strengths || []).map((s) => `<li>✅ ${esc(s)}</li>`).join("") || ""}</ul></div>
+            <div class="small muted"><b style="color:var(--text)">Improvements</b><ul class="plain">${(r.improvements || []).map((s) => `<li>⚠️ ${esc(s)}</li>`).join("") || ""}</ul></div>
+            <div class="small"><b style="color:var(--text)">Next steps</b><ul class="plain">${(r.next_steps || []).map((s) => `<li>→ ${esc(s)}</li>`).join("") || ""}</ul></div></div>`;
+      } catch (ex) { toast(ex.message); }
+      finally { showLoader(false); }
+    });
+  } catch (ex) { view.innerHTML = emptyState("University not found", ex.message); }
+  finally { showLoader(false); }
+}
+
+/* ---------------------------------------------------------------- roadmap v2 */
+const STAGE_META = {
+  discover: { icon: "🔍", label: "Discover Yourself", desc: "Interests, strengths and the foundation of your story." },
+  explore: { icon: "🧭", label: "Explore & Experiment", desc: "Broaden horizons, test ideas and build habits." },
+  build: { icon: "🛠️", label: "Build Your Profile", desc: "Create projects and evidence of your skill." },
+  apply: { icon: "🚀", label: "Apply With Confidence", desc: "Applications, decisions and the next chapter." },
+};
+const PP_CATS = {
+  projects: { icon: "🛠️", label: "Projects" },
+  competitions: { icon: "🏆", label: "Competitions" },
+  certifications: { icon: "🎓", label: "Certifications" },
+  leadership: { icon: "🙌", label: "Leadership" },
+  research: { icon: "🔬", label: "Research" },
+  activities: { icon: "🎯", label: "Activities" },
+  achievements: { icon: "⭐", label: "Achievements" },
+};
+function prettyDate(d) {
+  if (!d) return "";
+  const dt = new Date(String(d).length === 10 ? d + "T00:00:00" : d);
+  return isNaN(dt) ? String(d) : dt.toLocaleDateString([], { year: "numeric", month: "short", day: "numeric" });
+}
+
+let _rmGoalId = null, _rmTaskFilter = "all";
+async function renderRoadmap() {
+  showLoader(true); view.innerHTML = "";
+  const scrollY = window.scrollY;
+  try {
+    const [dctx, goals, priorities, tasks] = await Promise.all([
+      getDnaContext(), api("/roadmap/goals").catch(() => []), api("/roadmap/priorities").catch(() => []), api("/roadmap/tasks").catch(() => []),
+    ]);
+    const activeGoals = (goals || []).filter((g) => g.status === "active");
+    if (!activeGoals.some((g) => _rmGoalId && String(g.id) === String(_rmGoalId))) _rmGoalId = activeGoals.length ? activeGoals[0].id : null;
+    const roadmap = await api("/roadmap" + (_rmGoalId ? `?goal_id=${_rmGoalId}` : "")).catch(() => ({ goal: null, stages: {}, progress_percent: 0 }));
+    const stages = roadmap.stages || {};
+    const gradeKeys = Object.keys(stages).filter((g) => (stages[g] || []).length).sort((a, b) => Number(a) - Number(b));
+    const allItems = gradeKeys.flatMap((g) => stages[g]);
+    const doneCount = allItems.filter((i) => i.completed).length;
+    const pct = Math.round(roadmap.progress_percent || 0);
+    const prioDone = (priorities || []).filter((p) => p.completed).length;
+    const taskDone = (tasks || []).filter((t) => t.status === "done").length;
+    const goal = roadmap.goal || null;
+    const firstName = (state.user.first_name || state.user.name || "there").split(" ")[0];
+
+    const gradeBlock = (grade) => {
+      const items = stages[grade];
+      const meta = STAGE_META[items[0]?.stage] || { icon: "🎯", label: "Your journey" };
+      const gd = items.filter((i) => i.completed).length;
+      const gp = items.length ? Math.round((gd / items.length) * 100) : 0;
+      return `
+        <div class="tl-grade">
+          <div class="tl-grade-head">
+            <div class="tl-grade-ico">${meta.icon}</div>
+            <div style="flex:1;min-width:0">
+              <div class="tl-grade-name">Grade ${esc(String(grade))} · ${esc(meta.label)}</div>
+              <div class="tl-grade-sub small muted">${meta.desc || "Grow one step at a time."}</div>
+            </div>
+            <div class="tl-grade-pct"><b style="color:${ringColor(gp)}">${gp}%</b><span class="muted small">${gd}/${items.length}</span></div>
+          </div>
+          <div class="progress-track tl-progress"><div class="progress-fill" style="width:${gp}%"></div></div>
+          <div class="tl-items">
+            ${items.map((it) => `
+              <div class="rm-item ${it.completed ? "done" : ""}" data-item="${it.id}">
+                <label class="rm-check" title="${it.completed ? "Mark as not done" : "Mark done"}">
+                  <input type="checkbox" ${it.completed ? "checked" : ""} data-toggle="${it.id}">
+                  <span class="rm-checkbox">✓</span>
+                </label>
+                <div class="rm-body">
+                  <div class="rm-top">
+                    <b>${esc(it.title)}</b>
+                    <span class="rm-stage stage-${esc(it.stage)}">${esc(it.stage)}</span>
+                    ${it.completed ? `<span class="pill good">done</span>` : ""}
+                  </div>
+                  ${it.description ? `<p class="small muted rm-desc">${esc(it.description)}</p>` : ""}
+                </div>
+              </div>`).join("")}
+          </div>
+        </div>`;
+    };
+
+    const prioRows = (priorities || []).map((p) => `
+      <div class="prio-row ${p.completed ? "done" : ""}">
+        <label class="rm-check" title="Toggle priority"><input type="checkbox" ${p.completed ? "checked" : ""} data-prio="${p.id}"><span class="rm-checkbox">✓</span></label>
+        <div class="prio-body">
+          <b>${esc(p.title)}</b>
+          <div class="small muted">${esc(p.skill_category)}${p.minutes ? " · " + p.minutes + " min" : ""}</div>
+        </div>
+      </div>`).join("");
+
+    const taskRows = (tasks || []).filter((t) => _rmTaskFilter === "all" ? true : _rmTaskFilter === "done" ? t.status === "done" : t.status !== "done")
+      .map((t) => `
+      <div class="task-row ${t.status === "done" ? "done" : ""}">
+        <label class="rm-check" title="Toggle task"><input type="checkbox" ${t.status === "done" ? "checked" : ""} data-task="${t.id}"><span class="rm-checkbox">✓</span></label>
+        <div class="prio-body">
+          <b>${esc(t.title)}</b>
+          <div class="small muted">${esc(t.category)}${t.due_date ? " · due " + prettyDate(t.due_date) : ""}</div>
+        </div>
+      </div>`).join("");
+
+    view.innerHTML = `
+      <div class="hero">
+        ${kicker(`Good ${bellTime()}, ${esc(firstName)} · your plan, sequenced`)}
+        <h1>My <span class="grad">Roadmap</span></h1>
+        <p>Goals become a grade-by-grade roadmap. Tick steps off — Novi carries your momentum forward.</p>
+      </div>
+      ${dnaBarHTML(dctx, "roadmap")}
+
+      <div class="stats-strip">
+        <div class="stat-mini"><span class="sm-ico">🎯</span><div><b>${activeGoals.length}</b><span>active goals</span></div></div>
+        <div class="stat-mini"><span class="sm-ico">🗺️</span><div><b style="color:${ringColor(pct)}">${pct}%</b><span>roadmap done</span></div></div>
+        <div class="stat-mini"><span class="sm-ico">✅</span><div><b>${prioDone}/${(priorities || []).length}</b><span>priorities</span></div></div>
+        <div class="stat-mini"><span class="sm-ico">📋</span><div><b>${taskDone}/${(tasks || []).length}</b><span>tasks done</span></div></div>
+      </div>
+
+      <div class="rm-layout">
+        <div class="rm-main">
+          <div class="card mb">
+            <div class="between">
+              <h2>Goals</h2>
+              <span class="pill mid">${activeGoals.length} active</span>
+            </div>
+            <div class="goal-tabs mt">
+              ${activeGoals.map((g) => `
+                <button class="goal-tab ${String(g.id) === String(_rmGoalId) ? "on" : ""}" data-goal="${g.id}">
+                  <span class="gt-title">${esc(g.title)}</span>
+                  <span class="pill">${esc(g.category)}</span>
+                </button>`).join("")}
+              <button class="goal-tab add" id="goal-add-toggle">＋ New goal</button>
+            </div>
+            <div id="goal-add-box" class="goal-add hidden">
+              <input id="goal-title" placeholder="e.g. Get into a top AI university" style="flex:1;min-width:220px">
+              <select id="goal-cat"><option value="career">Career</option><option value="university">University</option></select>
+              <button class="btn" id="add-goal">Add</button>
+              <button class="btn-ghost" id="goal-add-cancel">Cancel</button>
+            </div>
+          </div>
+
+          <div class="card rm-head">
+            <div class="between">
+              <div style="min-width:0">
+                ${goal ? `
+                  <div class="rm-head-title"><h2>${esc(goal.title)}</h2>${pill(esc(goal.category), "mid")}${goal.status === "active" ? "" : pill(esc(goal.status), "good")}</div>
+                  <div class="small muted mt">${doneCount} of ${allItems.length} steps completed${goal.description ? " · " + esc(goal.description) : ""}</div>`
+                : `<h2>Your combined journey</h2><div class="small muted mt">${doneCount} of ${allItems.length} steps completed across all goals</div>`}
+              </div>
+              ${goal && goal.status === "active" ? `
+                <div class="row">
+                  ${allItems.length ? `<button class="btn-ghost small" id="rm-del" style="color:var(--bad)">delete</button>` : ""}
+                  <button class="btn-ghost" id="rm-done">Mark done</button>
+                  <button class="btn" id="rm-generate">✨ Generate roadmap</button>
+                </div>` : ""}
+            </div>
+            ${allItems.length ? `
+              <div class="row between mt">
+                <div class="progress-track" style="flex:1"><div class="progress-fill" style="width:${pct}%"></div></div>
+                <b style="color:${ringColor(pct)}">${pct}%</b>
+              </div>` : ""}
+          </div>
+
+          ${gradeKeys.length ? `
+            <div class="timeline">${gradeKeys.map(gradeBlock).join("")}</div>
+            <div class="legend-row">
+              ${Object.entries(STAGE_META).map(([k, v]) => `<span class="rm-stage stage-${k}">${v.icon} ${esc(v.label)}</span>`).join(" ")}
+            </div>`
+          : (goal ? `
+            <div class="card">
+              <div class="between"><h3>No roadmap yet</h3><button class="btn" id="rm-generate-pty">✨ Generate your roadmap</button></div>
+              <p class="small muted mt">Tell Novi your goal and it will map out a grade-by-grade plan in seconds.</p>
+            </div>` : `
+            <div class="card"><h3>Set your first goal to start your map</h3><p class="small muted mt">Tap <b>＋ New goal</b> above, then generate its roadmap.</p></div>`)}
+        </div>
+
+        <div class="rm-side">
+          <div class="card">
+            <div class="between"><h2>This week</h2><span class="pill mid">${prioDone}/${(priorities || []).length}</span></div>
+            <p class="small muted mt">Priorities crafted for this week by Novi.</p>
+            <button class="btn mt" id="prio-gen">✨ Generate with AI</button>
+            <div id="prio-list" class="mt">
+              ${prioRows || `<p class="small muted">No priorities yet — generate some above.</p>`}
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="between"><h2>Tasks</h2><span class="pill mid">${taskDone}/${(tasks || []).length}</span></div>
+            <div class="row mt">
+              <input id="task-title" placeholder="New task…" style="flex:1">
+              <select id="task-cat" style="width:auto"><option>build</option><option>explore</option><option>grow</option></select>
+              <button class="btn" id="add-task">Add</button>
+            </div>
+            <div class="filter-tabs mt">
+              ${[["all", `All · ${(tasks || []).length}`], ["active", `Active`], ["done", `Done · ${taskDone}`]].map(([k, l]) => `<button class="ft ${_rmTaskFilter === k ? "on" : ""}" data-ft="${k}">${l}</button>`).join("")}
+            </div>
+            <div id="task-list" class="mt">
+              ${taskRows || `<p class="small muted">No tasks match this filter.</p>`}
+            </div>
+          </div>
+        </div>
+      </div>`;
+
+    const reload = async (msg, keepScroll = true) => {
+      const y = keepScroll ? window.scrollY : 0;
+      await renderRoadmap();
+      window.scrollTo(0, keepScroll ? y : 0);
+      if (msg) toast(msg);
+    };
+    const addGoal = async () => {
+      const t = view.querySelector("#goal-title").value.trim(); if (!t) return;
+      showLoader(true);
+      try { const g = await api("/roadmap/goals", { method: "POST", body: JSON.stringify({ title: t, category: view.querySelector("#goal-cat").value }) }); _rmGoalId = g.id; await reload("Goal added — generate its roadmap when you're ready ✨"); }
+      catch (ex) { toast(ex.message); showLoader(false); }
+    };
+    view.querySelectorAll(".goal-tab[data-goal]").forEach((b) => b.addEventListener("click", () => { _rmGoalId = Number(b.dataset.goal); renderRoadmap(); }));
+    const gAt = view.querySelector("#goal-add-toggle"); if (gAt) gAt.addEventListener("click", () => { view.querySelector("#goal-add-box").classList.toggle("hidden"); });
+    const gAc = view.querySelector("#goal-add-cancel"); if (gAc) gAc.addEventListener("click", () => view.querySelector("#goal-add-box").classList.add("hidden"));
+    const ag = view.querySelector("#add-goal"); if (ag) ag.addEventListener("click", addGoal);
+    const gt = view.querySelector("#goal-title"); if (gt) gt.addEventListener("keydown", (e) => { if (e.key === "Enter") addGoal(); });
+    view.querySelectorAll("#rm-generate, #rm-generate-pty").forEach((b) => b.addEventListener("click", async () => {
+      showLoader(true);
+      try { await api("/roadmap/generate", { method: "POST", body: JSON.stringify({ goal_id: _rmGoalId }) }); await renderRoadmap(); toast("Roadmap generated 🌱"); }
+      catch (ex) { toast(ex.message); showLoader(false); }
+    }));
+    const rmDone = view.querySelector("#rm-done"); if (rmDone) rmDone.addEventListener("click", async () => {
+      if (!confirm("Mark this goal as done?")) return;
+      try { await api(`/roadmap/goals/${_rmGoalId}`, { method: "PATCH", body: JSON.stringify({ status: "done" }) }); toast("Goal complete — congratulations 🎉"); reload("", false); }
+      catch (ex) { toast(ex.message); }
+    });
+    const rmDel = view.querySelector("#rm-del"); if (rmDel) rmDel.addEventListener("click", async () => {
+      if (!confirm("Cancel this goal? Its roadmap items will be removed.")) return;
+      try { await api(`/roadmap/goals/${_rmGoalId}`, { method: "PATCH", body: JSON.stringify({ status: "cancelled" }) }); _rmGoalId = null; await reload("Goal cancelled", false); }
+      catch (ex) { toast(ex.message); }
+    });
+    view.querySelectorAll(".tl-items").forEach((box) => box.addEventListener("change", async (e) => {
+      const b = e.target.closest("[data-toggle]"); if (!b) return;
+      b.indeterminate = false;
+      await api(`/roadmap/items/${b.dataset.toggle}`, { method: "PATCH" });
+      reload("Step updated ✓");
+    }));
+    view.querySelector("#prio-list").addEventListener("change", async (e) => {
+      const b = e.target.closest("[data-prio]"); if (!b) return;
+      await api(`/roadmap/priorities/${b.dataset.prio}`, { method: "PATCH" });
+      reload("Priority updated ✓");
+    });
+    const pg = view.querySelector("#prio-gen"); if (pg) pg.addEventListener("click", async () => {
+      pg.disabled = true; pg.textContent = "Thinking…";
+      try { await api("/roadmap/priorities/generate", { method: "POST", body: JSON.stringify({}) }); await reload("Priorities refreshed for this week ✨"); }
+      catch (ex) { toast(ex.message); pg.disabled = false; pg.textContent = "✨ Generate with AI"; }
+    });
+    view.querySelectorAll(".ft").forEach((b) => b.addEventListener("click", () => { _rmTaskFilter = b.dataset.ft; renderRoadmap(); }));
+    const addTaskBtn = view.querySelector("#add-task"); if (addTaskBtn) addTaskBtn.addEventListener("click", async () => {
+      const t = view.querySelector("#task-title").value.trim(); if (!t) return;
+      showLoader(true);
+      try { await api("/roadmap/tasks", { method: "POST", body: JSON.stringify({ title: t, category: view.querySelector("#task-cat").value }) }); await reload("Task added ✓"); }
+      catch (ex) { toast(ex.message); showLoader(false); }
+    });
+    const tt = view.querySelector("#task-title"); if (tt) tt.addEventListener("keydown", (e) => { if (e.key === "Enter") addTaskBtn.click(); });
+    if (view.querySelector("#task-list")) view.querySelector("#task-list").addEventListener("change", async (e) => {
+      const b = e.target.closest("[data-task]"); if (!b) return;
+      const togglingTo = e.target.checked ? "done" : "active";
+      await api(`/roadmap/tasks/${b.dataset.task}`, { method: "PATCH", body: JSON.stringify({ status: togglingTo }) });
+      reload("Task updated ✓");
+    });
+  } catch (ex) { view.innerHTML = emptyState("Roadmap unavailable", ex.message); }
+  finally { showLoader(false); window.scrollTo(0, scrollY); }
+}
+
+/* ---------------------------------------------------------------- passport v2 */
+let _ppFilter = "all", _ppEditing = null, _ppCache = [];
+async function renderPassport() {
+  showLoader(true); view.innerHTML = "";
+  try {
+    const [dctx, items, comp] = await Promise.all([
+      getDnaContext(), api("/passport").catch(() => []), api("/passport/completion").catch(() => ({ score: 0 })),
+    ]);
+    _ppCache = items;
+    const firstName = state.user.first_name || state.user.name || "Student";
+    const lastName = state.user.last_name || "";
+    const byCat = (c) => items.filter((i) => i.category === c);
+    const verifiedCount = items.filter((i) => i.verified).length;
+    const covered = Object.keys(comp.by_category || {}).filter((c) => (comp.by_category[c] || 0) > 0);
+    const skillSet = [...new Set(items.flatMap((i) => (i.skills || []).map((s) => String(s).trim()).filter(Boolean)))];
+    const dnaFocus = (dctx && (dctx.label || dctx.top_zone)) || comp.dna_focus || "";
+    const headline = dnaFocus ? `${dnaFocus.toUpperCase()} PORTFOLIO` : "CAREER PORTFOLIO";
+    const skillPool = skillSet.length ? skillSet.slice(0, 10) : (dctx && (dctx.skills || []).slice(0, 6) || []);
+    const score = comp.score || 0;
+    const editing = _ppEditing ? items.find((i) => i.id === _ppEditing) : null;
+
+    const pfCard = (i) => `
+      <div class="pf-card ${i.verified ? "verified" : ""}">
+        <div class="pf-card-top">
+          <div class="pf-ico">${PP_CATS[i.category]?.icon || "⭐"}</div>
+          <div class="row" style="gap:6px">
+            ${i.verified ? `<span class="pill good">✓ verified</span>` : `<span class="pill mid">${esc(PP_CATS[i.category]?.label || i.category)}</span>`}
+          </div>
+        </div>
+        <h3 class="pf-card-title">${esc(i.title)}</h3>
+        ${i.date_achieved ? `<div class="pf-date">📅 ${prettyDate(i.date_achieved)}</div>` : ""}
+        ${i.description ? `<p class="small muted pf-desc">${esc(i.description)}</p>` : ""}
+        ${(i.skills || []).length ? `<div class="tag-list">${i.skills.map((s) => `<span class="chip acc">${esc(s)}</span>`).join("")}</div>` : ""}
+        <div class="pf-actions">
+          <button class="btn-ghost small" data-pp-edit="${i.id}">Edit</button>
+          <button class="btn-ghost small" style="color:var(--bad)" data-pp-del="${i.id}">Delete</button>
+          ${i.certificate_url ? `<a class="btn-ghost small" href="${esc(i.certificate_url)}" target="_blank" rel="noopener">View proof ↗</a>` : ""}
+        </div>
+      </div>`;
+
+    const filtered = _ppFilter === "all" ? items : items.filter((i) => i.category === _ppFilter);
+    const formTitle = editing ? "Edit entry" : "Add an achievement";
+
+    view.innerHTML = `
+      <div class="hero">
+        ${kicker("Your evidence of growth")}
+        <h1>Career <span class="grad">Passport</span></h1>
+        <p>Every project, win and experience that proves your potential — one polished portfolio of proof.</p>
+      </div>
+      ${dnaBarHTML(dctx, "passport")}
+
+      <div class="pf-cover">
+        <div class="pf-cover-bg"></div>
+        <div class="pf-cover-inner">
+          <div class="pf-avatar">${initials(firstName + " " + lastName)}</div>
+          <div style="min-width:0">
+            <div class="pf-country">NOVI · Career Passport</div>
+            <h1 class="pf-name">${esc(firstName)} ${lastName ? `<span class="grad">${esc(lastName)}</span>` : ""}</h1>
+            <div class="pf-headline">${esc(headline)}</div>
+          </div>
+          <div class="pf-score">
+            ${ringHTML(score, Math.round(score) + "%", 70)}
+            <div class="small muted">profile score</div>
+          </div>
+        </div>
+        <div class="pf-stats">
+          <div><b>${items.length}</b><span>entries</span></div>
+          <div><b style="color:var(--good)">${verifiedCount}</b><span>verified</span></div>
+          <div><b style="color:var(--accent-2)">${covered.length}</b><span>categories</span></div>
+          <div><b style="color:${ringColor(score)}">${skillPool.length}</b><span>skills</span></div>
+        </div>
+      </div>
+
+      ${skillPool.length ? `
+        <div class="card mb">
+          <div class="block-title">Profile strengths</div>
+          <div class="tag-list" style="margin:0">${skillPool.map((s) => `<span class="chip acc">✦ ${esc(s)}</span>`).join("")}</div>
+        </div>` : ""}
+
+      ${(comp.novi_note || comp.suggested_next) ? `
+        <div class="card novi-box mb">
+          <span class="novi-avatar">N</span>
+          ${comp.novi_note ? `<span class="small">${esc(comp.novi_note)}</span>` : ""}
+          ${comp.suggested_next ? `<div class="small mt"><b style="color:var(--accent-2)">→ ${esc(comp.suggested_next)}</b></div>` : ""}
+        </div>` : ""}
+
+      <div class="card pf-form mb" id="pf-form">
+        <div class="between"><h2>${formTitle}</h2>${editing ? `<button class="btn-ghost small" id="pp-cancel">Cancel</button>` : ""}</div>
+        <div class="cols mt" style="gap:14px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))">
+          <div class="field" style="margin:0"><label>Category</label>
+            <select id="pp-cat">${Object.entries(PP_CATS).map(([k, v]) => `<option value="${k}" ${editing && editing.category === k ? "selected" : ""}>${v.icon} ${v.label}</option>`).join("")}</select></div>
+          <div class="field" style="margin:0"><label>Date achieved (optional)</label><input id="pp-date" type="date" value="${editing && editing.date_achieved ? (editing.date_achieved || "") : ""}"></div>
+        </div>
+        <div class="field mt"><label>Title</label><input id="pp-title" placeholder="e.g. National Robotics finalist" value="${editing ? esc(editing.title) : ""}"></div>
+        <div class="field"><label>Description</label><textarea id="pp-desc" placeholder="What did you do, and what did it take?">${editing ? esc(editing.description || "") : ""}</textarea></div>
+        <div class="row" style="gap:12px;align-items:flex-end">
+          <div class="field" style="flex:1;margin:0"><label>Skills (comma separated)</label><input id="pp-skills" placeholder="python, data analysis, leadership" value="${editing ? esc((editing.skills || []).join(", ")) : ""}"></div>
+          <button class="btn" id="pp-save">${editing ? "Save changes" : "Add to passport"}</button>
+        </div>
+      </div>
+
+      <div class="pf-tabs">
+        <button class="cat-pill ${_ppFilter === "all" ? "on" : ""}" data-cat="all">🧰 All · ${items.length}</button>
+        ${Object.entries(PP_CATS).map(([k, v]) => `<button class="cat-pill ${_ppFilter === k ? "on" : ""}" data-cat="${k}">${v.icon} ${v.label} · ${byCat(k).length}</button>`).join("")}
+      </div>
+
+      <div id="pf-grid" class="pf-grid">
+        ${filtered.length ? filtered.map(pfCard).join("") : `
+          <div class="card empty" style="grid-column:1/-1">
+            <h3>Nothing here yet</h3>
+            <p class="small muted mt">Add your first ${_ppFilter === "all" ? "achievement" : (PP_CATS[_ppFilter] ? PP_CATS[_ppFilter].label.toLowerCase() : "entry")} to grow your portfolio.</p>
+          </div>`}
+      </div>`;
+
+    const resetForm = (re) => { _ppEditing = null; if (re) renderPassport(); else { renderPassport(); } };
+    const save = async () => {
+      const payload = {
+        category: view.querySelector("#pp-cat").value,
+        title: view.querySelector("#pp-title").value.trim(),
+        description: view.querySelector("#pp-desc").value.trim(),
+        date_achieved: view.querySelector("#pp-date").value || null,
+        skills: view.querySelector("#pp-skills").value.split(",").map((s) => s.trim()).filter(Boolean),
+      };
+      if (!payload.title) { toast("A title is required", "err"); return; }
+      showLoader(true);
+      try {
+        if (_ppEditing) { await api(`/passport/items/${_ppEditing}`, { method: "PATCH", body: JSON.stringify(payload) }); toast("Entry updated ✓"); }
+        else { await api("/passport/items", { method: "POST", body: JSON.stringify(payload) }); toast("Added to your passport ✨"); }
+        _ppEditing = null; await renderPassport();
+      } catch (ex) { toast(ex.message); showLoader(false); }
+    };
+    view.querySelector("#pp-save").addEventListener("click", save);
+    view.querySelector("#pp-title").addEventListener("keydown", (e) => { if (e.key === "Enter") save(); });
+    const ppCancel = view.querySelector("#pp-cancel"); if (ppCancel) ppCancel.addEventListener("click", () => { _ppEditing = null; renderPassport(); });
+    view.querySelectorAll(".pf-tabs .cat-pill").forEach((b) => b.addEventListener("click", () => { _ppFilter = b.dataset.cat; renderPassport(); }));
+    view.querySelector("#pf-grid").addEventListener("click", async (e) => {
+      const del = e.target.closest("[data-pp-del]");
+      if (del) {
+        if (!confirm("Remove this entry from your passport?")) return;
+        try { await api(`/passport/items/${del.dataset.ppDel}`, { method: "DELETE" }); toast("Entry removed"); await renderPassport(); }
+        catch (ex) { toast(ex.message); }
+        return;
+      }
+      const edit = e.target.closest("[data-pp-edit]");
+      if (edit) { _ppEditing = Number(edit.dataset.ppEdit); renderPassport(); if (view.querySelector("#pp-title")) { view.querySelector("#pp-title").focus(); view.scrollIntoView({ behavior: "smooth", block: "start" }); } }
+    });
+  } catch (ex) { view.innerHTML = emptyState("Passport unavailable", ex.message); }
+  finally { showLoader(false); }
+}
+
+/* ---------------------------------------------------------------- check-in */
+async function renderCheckin() {
+  showLoader(true); view.innerHTML = "";
+  try {
+    const [dctx, cur, history] = await Promise.all([getDnaContext(), api("/checkins/current"), api("/checkins").catch(() => [])]);
+    const ai = cur.ai_summary && typeof cur.ai_summary === "object" ? cur.ai_summary : null;
+    view.innerHTML = `
+      <div class="hero">${kicker("Your weekly pulse")}<h1>Weekly Check-in</h1><p>Your weekly pulse with Novi — honest answers make your mentoring sharper.</p></div>
+      ${dnaBarHTML(dctx, "checkin")}
+      <div class="card mb">
+        <div class="between"><h2>This week · ${esc(cur.week_start || "")}</h2>${cur.status ? pill(esc(cur.status), "mid") : ""}</div>
+        ${ai ? `
+          <div class="novi-box mt">
+            <span class="novi-avatar">N</span>
+            <span class="small">${ai.dna_alignment ? `<b>DNA tie-in.</b> ${esc(ai.dna_alignment)}` : esc("Novi has summarised your week.")}</span>
+            <div class="row mt">
+              ${((ai.new_skills || []).slice(0, 3)).map((s) => `<span class="chip">${esc(s)}</span>`).join("")}
+              ${((ai.milestones || []).slice(0, 3)).map((s) => `<span class="chip acc">${esc(s)}</span>`).join("")}
+            </div>
+          </div>` : ""}
+      </div>
+      <div class="ck-layout">
+        <div class="ck-form">
+          <div class="checkin-grid">
+            ${[["accomplishments", "What did you accomplish this week?", "e.g. Finished my Python project"], ["learnings", "What did you learn?", "e.g. Pandas for data analysis"], ["challenges", "What was challenging?", "e.g. Balancing tests and coding"], ["pride", "What are you proud of?", "e.g. Led a team demo"], ["next_week", "What would you do better next week?", "e.g. Start my AI project proposal"]].map(([k, l, ph]) => `
+              <div class="card"><h3>${l}</h3><textarea class="mt" data-ck="${k}" style="min-height:110px" placeholder="${ph}">${esc(cur[k] || "")}</textarea></div>`).join("")}
+            <div class="card"><h3>Mood</h3>
+              <input type="hidden" data-ck="mood" value="${esc(cur.mood || "")}">
+              <div class="mood-grid mt">${Object.keys(MOODS).map((m) => `<button type="button" class="mood-btn ${cur.mood === m ? "on" : ""}" data-mood="${m}">${moodIcon(m)} ${m}</button>`).join("")}</div></div>
+            <div class="card"><h3>Energy (1-10)</h3><input type="number" min="1" max="10" class="mt" data-ck="energy" value="${cur.energy || ""}"></div>
+          </div>
+          <div class="row mt">
+            <button class="btn" id="ck-save">Save check-in</button>
+            <button class="btn-ghost" id="ck-summarize">Summarize with AI</button>
+          </div>
+        </div>
+        <div class="card ck-history">
+          <h2>History</h2>
+          ${(history || []).length ? history.map((h) => `
+            <div class="list-item mb">
+              <div class="between"><b>${esc(h.week_start || ("Week " + (h.week_number || "")))}</b>${pill(esc(h.status || "—"), "mid")}</div>
+              ${h.accomplishments ? `<div class="small muted mt" style="margin-top:2px">${esc(String(h.accomplishments).slice(0, 90))}</div>` : ""}
+            </div>`).join("") : `<p class="small muted">No previous check-ins.</p>`}
+        </div>
+      </div>`;
+    const collect = () => {
+      const p = {};
+      view.querySelectorAll("[data-ck]").forEach((el) => { const v = el.value; if (v) p[el.dataset.ck] = el.dataset.ck === "mood" ? v : el.dataset.ck === "energy" ? Number(v) : String(v); });
+      return p;
+    };
+    view.querySelector("#ck-save").addEventListener("click", async () => {
+      showLoader(true);
+      try { await api("/checkins", { method: "POST", body: JSON.stringify(collect()) }); toast("Check-in saved ✓"); renderCheckin(); }
+      catch (ex) { toast(ex.message); showLoader(false); }
+    });
+    view.querySelector("#ck-summarize").addEventListener("click", async () => {
+      showLoader(true);
+      try { await api("/checkins/summarize", { method: "POST" }); renderCheckin(); }
+      catch (ex) { toast(ex.message); showLoader(false); }
+    });
+    view.querySelectorAll(".mood-btn").forEach((b) => b.addEventListener("click", () => {
+      view.querySelectorAll(".mood-btn").forEach((x) => x.classList.remove("on"));
+      b.classList.add("on");
+      view.querySelector('[data-ck="mood"]').value = b.dataset.mood;
+    }));
+  } catch (ex) { view.innerHTML = emptyState("Check-in unavailable", ex.message); }
+  finally { showLoader(false); }
+}
+
+/* ---------------------------------------------------------------- parent */
+async function renderOverview() {
+  showLoader(true); view.innerHTML = "";
+  try {
+    const d = await api("/parents/dashboard");
+    const cStat = (c, k) => (c[k] !== undefined && c[k] !== null ? c[k] : null);
+    const pct = (v) => typeof v === "number" ? `${Math.round(v)}%` : v;
+    view.innerHTML = `
+      <div class="hero"><h1>Parent Overview</h1><p>Follow your child's universe of growth — without hovering.</p></div>
+      <div class="card mb">
+        <h2>Link a student</h2><p class="small muted">Enter the email your child signed up with.</p>
+        <div class="row mt"><input id="link-email" placeholder="child@school.edu" style="flex:1;max-width:360px"><button class="btn" id="link-btn">Link</button></div>
+      </div>
+      <div class="section-title">Children</div>
+      ${(d.children || []).length ? d.children.map((c) => `
+        <div class="card mb">
+          <div class="between"><h2>${esc(c.name)} <span class="muted" style="font-weight:400">· Grade ${esc(c.grade || "—")}</span></h2>
+            ${c.career_direction ? pill(esc(c.career_direction) === "On Track" ? "On track 🟢" : esc(c.career_direction) === "Needs Focus" ? "Needs focus ⚠️" : esc(c.career_direction) + " 🔭", "mid") : ""}</div>
+          <div class="cols mt">
+            ${[["profile_strength", "Profile strength"], ["university_readiness", "University readiness"]].map(([k, n]) => {
+              const v = cStat(c, k);
+              return `<div class="card" style="background:var(--panel-2)"><div class="between"><span class="small muted">${n}</span><b style="color:${typeof v === "number" ? ringColor(v) : "var(--text)"}">${pct(v)}</b></div><div class="progress-track mt progress-sm"><div class="progress-fill" style="width:${typeof v === "number" ? v : 0}%;background:${typeof v === "number" ? ringColor(v) : "var(--muted)"}"></div></div></div>`;
+            }).join("")}
+          </div>
+          ${(c.month_focus || []).length ? `<div class="small muted mt">Focus areas: ${c.month_focus.map((f) => `<span class="chip">${esc(f)}</span>`).join(" ")}</div>` : ""}
+          ${c.insight ? `<div class="novi-box mt"><span class="novi-avatar">N</span>${esc(c.insight)}</div>` : ""}
+        </div>`).join("") : emptyState("No children linked yet", "Link your child above to begin following their journey.")}
+      ${d.insight ? `<div class="card novi-box mt"><span class="novi-avatar">N</span>${esc(d.insight)}</div>` : ""}`;
+    view.querySelector("#link-btn").addEventListener("click", async () => {
+      const email = view.querySelector("#link-email").value.trim(); if (!email) return;
+      try { await api("/parents/link", { method: "POST", body: JSON.stringify({ student_email: email }) }); toast("Linked ✓"); renderOverview(); }
+      catch (ex) { toast(ex.message); }
+    });
+  } catch (ex) { view.innerHTML = emptyState("Overview unavailable", ex.message); }
+  finally { showLoader(false); }
+}
+
+async function renderAdvisor() {
+  showLoader(true); view.innerHTML = "";
+  view.innerHTML = `
+    <div class="hero"><h1>Parent Advisor</h1><p>Ask Novi for calm, evidence-based guidance about your child's journey.</p></div>
+    <div class="card">
+      <div class="field"><label>Ask Novi</label><textarea id="adv-q" placeholder="How can I support my child around exam stress?" style="min-height:100px"></textarea></div>
+      <button class="btn" id="adv-btn">Ask Novi</button>
+      <div id="adv-answer" class="mt"></div>
+    </div>`;
+  view.querySelector("#adv-btn").addEventListener("click", async () => {
+    const q = view.querySelector("#adv-q").value.trim(); if (!q) return;
+    showLoader(true);
+    try {
+      const r = await api("/parents/advisor", { method: "POST", body: JSON.stringify({ question: q }) });
+      view.querySelector("#adv-answer").innerHTML = `<div class="novi-box"><span class="novi-avatar">N</span>${esc(r.answer)}</div>`;
+    } catch (ex) { toast(ex.message); }
+    finally { showLoader(false); }
+  });
+  showLoader(false);
+}
+
+/* ---------------------------------------------------------------- boot */
+document.getElementById("logout-btn").addEventListener("click", logout);
+
+init();

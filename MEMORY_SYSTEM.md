@@ -53,8 +53,8 @@ delivers the full recall goal reliably without depending on Letta's agent loop.
 | **App users + `letta_agent_id` link** | MySQL `novi_db` table `users` | |
 
 ### Docker volumes (physical persistence)
-- `novi_tech_app_letta_pg_data` → Postgres data (all memory)
-- `novi_tech_app_letta_data` → Letta app config/logs (`/root/.letta`)
+- `<project>_letta_pg_data` → Postgres data (all memory)
+- `<project>_letta_data` → Letta app config/logs (`/root/.letta`)
 - These live inside the Docker Desktop VM at
   `/var/lib/docker/volumes/<name>/_data` (not directly browsable in Finder
   on macOS — use the psql/docker commands below).

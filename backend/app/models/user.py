@@ -1,0 +1,72 @@
+from datetime import datetime
+
+from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, func
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.core.database import Base
+from app.models.enums import UserRole
+
+
+def sa_enum(enum_cls, length: int = 30):
+    return Enum(enum_cls, native_enum=False, values_callable=lambda e: [m.value for m in e], length=length)
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[UserRole] = mapped_column(sa_enum(UserRole), nullable=False, default=UserRole.STUDENT)
+    first_name: Mapped[str] = mapped_column(String(100), default="")
+    last_name: Mapped[str] = mapped_column(String(100), default="")
+    grade: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    school: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    is_active: Mapped[bool] = mapped_column(default=True, server_default="1")
+    letta_agent_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    conversations = relationship("Conversation", back_populates="user", cascade="all, delete-orphan")
+    career_dna = relationship("CareerDNA", back_populates="user", uselist=False, cascade="all, delete-orphan")
+    career_matches = relationship("CareerMatch", back_populates="user", cascade="all, delete-orphan")
+    university_matches = relationship("UniversityMatch", back_populates="user", cascade="all, delete-orphan")
+    goals = relationship("Goal", back_populates="user", cascade="all, delete-orphan")
+    roadmap_items = relationship("RoadmapItem", back_populates="user", cascade="all, delete-orphan")
+    priorities = relationship("WeeklyPriority", back_populates="user", cascade="all, delete-orphan")
+    tasks = relationship("Task", back_populates="user", cascade="all, delete-orphan")
+    passport_items = relationship("PassportItem", back_populates="user", cascade="all, delete-orphan")
+    checkins = relationship("WeeklyCheckin", back_populates="user", cascade="all, delete-orphan")
+
+    linked_children = relationship(
+        "ParentStudentLink",
+        foreign_keys="ParentStudentLink.parent_id",
+        back_populates="parent",
+        cascade="all, delete-orphan",
+    )
+    linked_parents = relationship(
+        "ParentStudentLink",
+        foreign_keys="ParentStudentLink.student_id",
+        back_populates="student",
+        cascade="all, delete-orphan",
+    )
+
+    @property
+    def display_name(self) -> str:
+        return f"{self.first_name} {self.last_name}".strip() or self.email
+
+
+class ParentStudentLink(Base):
+    __tablename__ = "parent_student_links"
+    __table_args__ = {"mysql_engine": "InnoDB"}
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    parent_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    student_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    label: Mapped[str] = mapped_column(String(50), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    parent = relationship("User", foreign_keys=[parent_id], back_populates="linked_children")
+    student = relationship("User", foreign_keys=[student_id], back_populates="linked_parents")
