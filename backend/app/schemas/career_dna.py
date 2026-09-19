@@ -19,6 +19,8 @@ class CareerDNAOut(ORMModel):
     novi_reflection: str | None = None
     dna_filled: bool = False
     updated_at: str | None = None
+    sources: dict | None = None
+    excluded: list | None = None
 
 
 class CareerDNAUpdate(BaseModel):

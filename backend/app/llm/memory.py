@@ -186,11 +186,27 @@ class NoviMemory:
             print(f"[memory] recall failed: {exc}")
             return ""
 
-    def chat(self, agent_id: str, message: str) -> str:
-        """Send via Letta. Raises if Letta can't produce an answer."""
+    def chat(self, agent_id: str, message: str, user=None) -> str:
+        """Send via Letta. Raises if Letta can't produce an answer.
+        
+        Automatically archives the user's message so that memories are
+        persisted across sessions — even if no feature explicitly calls
+        ``memory.archive()``."""
         context = self.recall_context(agent_id, message)
         payload = f"{context}Student says: {message}" if context else message
-        return self.letta.send_message(agent_id, payload)
+        response = self.letta.send_message(agent_id, payload)
+        # --- auto‑archive the user's message so it survives a restart ---
+        if user is None:
+            # Minimal user object; archive() will auto‑create an agent
+            # the first time and then reuse the same agent_id thereafter.
+            class _User:
+                id = 0
+                full_name = "User"
+                grade = None
+                school = None
+            user = _User()
+        self.archive(user, message, tags=["chat"])
+        return response
 
     def timeline(self, agent_id: str) -> dict:
         """Structured student memory for easy retrieval, grouped by school year.
@@ -276,9 +292,42 @@ class NoviMemory:
 
     def archive(self, user, fact: str, tags: Iterable[str] = ()) -> bool:
         """Archive a durable fact from ANY feature (DNA, passport, check-ins, roadmap, ...)
-        into the student's Letta archival memory, tagged with school year + grade."""
+        into the student's Letta archival memory, tagged with school year + grade.
+
+        If the user has no Letta agent yet, one is created on the fly and its ID
+        is saved to the user's DB record so it stays the same for every future interaction."""
         agent = getattr(user, "letta_agent_id", None)
-        if not agent or not self.is_reachable() or not fact or not fact.strip():
+        if not agent:
+            # auto‑create an agent for this user using name/grade/school from the user model
+            name = getattr(user, "full_name", "") or f"User {getattr(user, 'id', '')}"
+            grade = getattr(user, "grade", None)
+            school = getattr(user, "school", None)
+            new_agent = self.ensure_agent(
+                user_id=getattr(user, "id", 0),
+                name=name,
+                grade=grade,
+                existing=None,
+                school=school,
+            )
+            if not new_agent:
+                return False
+            agent = new_agent
+            # *** Persist the new agent ID so future calls reuse the same agent ***
+            from app.core.database import get_db
+            from sqlalchemy import update as sq_update
+            from app.models.user import User as UserModel
+            try:
+                db_gen = get_db()
+                db = next(db_gen)
+                db.execute(
+                    sq_update(UserModel).where(UserModel.id == getattr(user, "id", 0))
+                    .values(letta_agent_id=agent)
+                )
+                db.commit()
+                db.commit()
+            except Exception as exc:
+                print(f"[memory] failed to save letta_agent_id to DB: {exc}")
+        if not self.is_reachable() or not fact or not fact.strip():
             return False
         full_tags = list(tags) + [sy_tag(), grade_tag(getattr(user, "grade", None))]
         try:

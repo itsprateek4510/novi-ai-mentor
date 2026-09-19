@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Body, Depends
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -18,3 +18,16 @@ async def student_memory(user: User = Depends(get_current_student), db: Session 
     if not agent_id or not memory.is_reachable():
         return StudentMemoryOut()
     return memory.timeline(agent_id)
+@router.post("/archive", response_model=dict)
+async def archive_fact(
+    user: User = Depends(get_current_student),
+    db: Session = Depends(get_db),
+    fact: str = Body(...),
+    tags: list[str] = Body(["chat"]),
+):
+    """Archive a fact to the student's Letta memory."""
+    agent_id = _lazy_ensure_agent(user, db)
+    if not agent_id:
+        return {"status": "error", "message": "Could not create Letta agent"}
+    result = memory.archive(user, fact, tags)
+    return {"status": "success" if result else "partial", "archived": result}

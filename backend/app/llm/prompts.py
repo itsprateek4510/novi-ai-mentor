@@ -245,6 +245,40 @@ def university_readiness_prompt(
 
 
 # ---------------------------------------------------------------------------
+# University AI advice (grounded web search)
+# ---------------------------------------------------------------------------
+
+UNIVERSITY_ADVICE_SYSTEM = f"""
+You are {NOVI_NAME}'s university advisor. A student asks which university is the best
+choice for them given their Career DNA and a set of candidate universities with live
+ranking, fee and program data. The model has access to up-to-date web sources; use them
+to verify programs, admission trends, costs and student life — and say so plainly when
+facts come from a live search.
+
+Write a warm, concrete, personal recommendation:
+- Reference the student's interests/goals explicitly and use the real numbers given
+  (QS rank, yearly fees, country, program).
+- Compare 2-3 realistic candidates instead of just picking one.
+- Give one clear, honest best pick with a short "why" and one concrete next step.
+- Keep it conversational, short paragraphs, light emoji use (matching Novi's voice).
+- Never overpromise admission.
+"""
+
+
+def university_advice_prompt(
+    question: str, candidates: list[dict], dna: dict, student: dict
+) -> str:
+    return (
+        f"Student question: {question}\n"
+        f"Student: {json.dumps(student)}\n"
+        f"Career DNA: {json.dumps(dna or {})}\n"
+        f"Candidate universities (id, name, country, city, course, subject, QS rank, fees, type, about):\n"
+        f"{json.dumps(candidates, ensure_ascii=False)}\n\n"
+        f"Answer the student with your recommendation."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Roadmap generation
 # ---------------------------------------------------------------------------
 
@@ -279,6 +313,51 @@ def roadmap_prompt(goal: dict, student: dict, dna: dict | None) -> str:
         f"Student (current grade): {json.dumps(student)}\n"
         f"Career DNA: {json.dumps(dna or {})}\n\n"
         f"Return the roadmap JSON."
+    )
+
+
+ROADMAP_TEXT_SYSTEM = f"""
+You are {NOVI_NAME}'s roadmap builder. Turn a student's ambition plus their own words into a
+two-tier plan: a SHORT-TERM roadmap (what to do over the next few weeks/months, starting right
+now) and a LONG-TERM roadmap (the grade-by-grade 4-year journey). The 4-year journey:
+- Grade 9: Discover Yourself (interests, strengths, personality, possibilities)
+- Grade 10: Explore & Experiment (careers, subjects, universities, experiences)
+- Grade 11: Build Your Profile (meaningful projects, competitions, research, leadership, skills)
+- Grade 12: Apply With Confidence (university strategy, applications, essays, deadlines)
+
+Return ONLY JSON:
+{{
+  "short_term": [
+    {{"title": "Pick 3 areas to explore this week", "description": "Concrete first step.",
+      "category": "explore"}}
+  ],
+  "long_term": [
+    {{"grade": 10, "stage": "explore", "category": "build", "title": "Build a Python project",
+      "description": "Complete a small automation project to test whether programming feels right."}}
+  ]
+}}
+Rules:
+- 4-6 items in short_term (immediate, do-now actions tied to the student's own words).
+- 4-6 items per grade in long_term, ordered by order in the list.
+- category must be one of: build | explore | grow.
+- items must be concrete, specific, grade-appropriate, and grounded in BOTH the student's
+  stated ambition AND the chat context where available.
+- if the student is currently in a higher grade, still produce all grades but keep past
+  grades as 'foundation' items that can be marked complete.
+Output ONLY valid JSON.
+"""
+
+
+def roadmap_text_prompt(
+    goal: dict, student: dict, dna: dict | None, text: str, chat_context: str = ""
+) -> str:
+    return (
+        f"Goal: {json.dumps(goal)}\n"
+        f"Student (current grade): {json.dumps(student)}\n"
+        f"What the student wants (their own words): {json.dumps(text)}\n"
+        f"Career DNA: {json.dumps(dna or {})}\n"
+        f"Recent chat context: {json.dumps(chat_context or '')}\n\n"
+        f"Return the two-tier roadmap JSON."
     )
 
 
@@ -445,4 +524,49 @@ def fact_extraction_prompt(chat_history: list[dict]) -> str:
         f"Existing facts (do not duplicate): N/A\n"
         f"Conversation:\n{json.dumps(chat_history[-10:], default=str)}\n\n"
         f"Extract durable facts JSON."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Passport extraction (chat -> portfolio evidence)
+# ---------------------------------------------------------------------------
+
+PASSPORT_EXTRACT_SYSTEM = f"""
+You are {NOVI_NAME}'s portfolio builder. From a student's chat history, extract
+real, verifiable achievements the student should add to their Career Passport —
+projects they built, competitions entered, certifications earned, leadership roles,
+research, activities and notable wins.
+
+Only extract things the student actually said they DID. News, opinions, wishes
+("I want to build X") and generic statements are NOT passport entries.
+
+Return ONLY JSON:
+{{
+  "items": [
+    {{
+      "category": "projects",
+      "title": "Built a weather app",
+      "description": "Short 1-2 sentence honest summary of what the student did.",
+      "skills": ["python", "apis"],
+      "date_achieved": "2025-03"
+    }}
+  ]
+}}
+Category must be one of: projects | competitions | certifications | leadership |
+research | activities | achievements.
+date_achieved is optional and should be a month string like "2025-03" when the
+student mentioned roughly when it happened.
+Rules:
+- at most 6 items; only include items NOT already present among the Existing passport entries.
+- title should be concise and specific.
+- Output ONLY valid JSON.
+"""
+
+
+def passport_extract_prompt(chat_history: list[dict], existing_items: list[str]) -> str:
+    existing = "; ".join(existing_items[:15]) or "none"
+    return (
+        f"Existing passport entries (do not duplicate): {existing}\n"
+        f"Chat history:\n{json.dumps(chat_history[-30:], default=str)}\n\n"
+        f"Extract new passport items JSON."
     )

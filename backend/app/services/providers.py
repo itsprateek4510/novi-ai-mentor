@@ -34,6 +34,7 @@ def dna_dict(dna) -> dict:
         "values": dna.values or [],
         "goals": dna.goals or [],
         "novi_reflection": dna.novi_reflection or "",
+        "excluded": dna.excluded or [],
     }
 
 

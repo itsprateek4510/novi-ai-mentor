@@ -31,6 +31,7 @@ class GoalOut(ORMModel):
 class RoadmapGenerateRequest(BaseModel):
     goal_id: int | None = None
     title: str | None = None        # used when goal_id is None
+    text: str | None = None         # free-form "what I want" from the roadmap input
 
 
 class RoadmapItemOut(ORMModel):
@@ -47,6 +48,7 @@ class RoadmapItemOut(ORMModel):
 class RoadmapOut(BaseModel):
     goal: GoalOut | None = None
     stages: dict[int, list[RoadmapItemOut]] = {}  # grade -> items
+    short_term: list[RoadmapItemOut] = []         # do-now items (this week/next few weeks)
     progress_percent: int = 0
 
 

@@ -122,7 +122,12 @@ def update_goal(db: Session, user: User, goal_id: int, data: GoalUpdate) -> Goal
 async def generate_roadmap(
     db: Session, user: User, request: RoadmapGenerateRequest
 ) -> RoadmapItem:
-    """Generate a grade-by-grade roadmap for a goal. Returns the root item."""
+    """Generate a grade-by-grade roadmap for a goal. Returns the root item.
+
+    When ``request.text`` is provided (the "what I want" field), a two-tier plan is
+    produced: short-term do-now actions (stage=foundations) plus the long-term
+    grade-by-grade journey, both grounded in chat memory + the student's own words.
+    """
     goal = None
     if request.goal_id:
         goal = db.get(Goal, request.goal_id)
@@ -130,31 +135,64 @@ async def generate_roadmap(
             goal = None
     if goal is None and request.title:
         goal = create_goal(db, user, GoalCreate(title=request.title))
+    if goal is None and request.text:
+        goal = create_goal(db, user, GoalCreate(title=request.text[:255]))
     if goal is None:
         raise ValueError("A goal is required")
 
     dna = get_dna(user, db)
-    items = _preset_items(goal) or []
-    if not items:
+
+    chat_context = ""
+    if request.text:
+        try:
+            if user.letta_agent_id:
+                chat_context = memory.recall_context(user.letta_agent_id, request.text)[:1200]
+        except Exception as exc:
+            print(f"[roadmap] chat recall failed: {exc}")
+
+    short_items: list[dict] = []
+    long_items: list[dict] = []
+    if request.text and request.text.strip():
         try:
             result = await gemini.complete_json(
-                prompts.roadmap_prompt(
+                prompts.roadmap_text_prompt(
                     {"title": goal.title, "description": goal.description, "category": goal.category.value},
                     {"name": user.display_name, "grade": user.grade},
                     dna_dict(dna),
+                    request.text,
+                    chat_context,
                 ),
-                system=prompts.ROADMAP_SYSTEM,
+                system=prompts.ROADMAP_TEXT_SYSTEM,
             )
-            raw_items = result.get("items") or [] if isinstance(result, dict) else []
-            items = _clean_roadmap_items(raw_items)
+            short_items = _clean_short_items((result or {}).get("short_term") or [])
+            long_items = _clean_roadmap_items((result or {}).get("long_term") or [])
         except Exception as exc:
-            print(f"[roadmap] generation failed, using template: {exc}")
-
-    if not items:
-        items = _template_roadmap(goal.title)
+            print(f"[roadmap] text generation failed, using template: {exc}")
+        if not short_items and not long_items:
+            short_items = _template_short(goal.title)
+            long_items = _template_roadmap(goal.title)
+    else:
+        items = _preset_items(goal) or []
+        if not items:
+            try:
+                result = await gemini.complete_json(
+                    prompts.roadmap_prompt(
+                        {"title": goal.title, "description": goal.description, "category": goal.category.value},
+                        {"name": user.display_name, "grade": user.grade},
+                        dna_dict(dna),
+                    ),
+                    system=prompts.ROADMAP_SYSTEM,
+                )
+                raw_items = result.get("items") or [] if isinstance(result, dict) else []
+                items = _clean_roadmap_items(raw_items)
+            except Exception as exc:
+                print(f"[roadmap] generation failed, using template: {exc}")
+        if not items:
+            items = _template_roadmap(goal.title)
+        long_items = items
 
     _purge_roadmap(db, user, goal.id)
-    for idx, item in enumerate(items):
+    for idx, item in enumerate(long_items):
         db.add(
             RoadmapItem(
                 user_id=user.id,
@@ -167,10 +205,25 @@ async def generate_roadmap(
                 order_index=idx,
             )
         )
+    cur_grade = user.grade if user.grade in GRADE_STAGE else 9
+    for idx, item in enumerate(short_items):
+        db.add(
+            RoadmapItem(
+                user_id=user.id,
+                goal_id=goal.id,
+                grade=cur_grade,
+                stage=RoadmapStage.FOUNDATIONS,
+                title=item["title"],
+                description=item["description"],
+                category=item.get("category", "build"),
+                order_index=idx,
+            )
+        )
     db.commit()
     memory.archive(
         user,
-        f"User built a roadmap for goal '{goal.title}' with {len(items)} steps across grades 9-12.",
+        f"User built a roadmap for goal '{goal.title}' with {len(long_items)} long-term steps "
+        f"across grades 9-12 and {len(short_items)} short-term do-now steps.",
         ("roadmap", "plan"),
     )
     return goal.id
@@ -180,26 +233,29 @@ def get_roadmap(db: Session, user: User, goal_id: int | None = None) -> dict:
     stmt = select(RoadmapItem).where(RoadmapItem.user_id == user.id)
     if goal_id:
         stmt = stmt.where(RoadmapItem.goal_id == goal_id)
-    items = list(db.scalars(stmt.order_by(RoadmapItem.grade, RoadmapItem.order_index)))
+    items = list(db.scalars(stmt.order_by(RoadmapItem.order_index)))
 
     stages: dict[int, list[dict]] = {grade: [] for grade in (9, 10, 11, 12)}
+    short_term: list[dict] = []
     for item in items:
-        stages.setdefault(item.grade, []).append(
-            {
-                "id": item.id,
-                "grade": item.grade,
-                "stage": item.stage.value,
-                "title": item.title,
-                "description": item.description,
-                "category": item.category,
-                "order_index": item.order_index,
-                "completed": item.completed,
-            }
-        )
+        row = {
+            "id": item.id,
+            "grade": item.grade,
+            "stage": item.stage.value,
+            "title": item.title,
+            "description": item.description,
+            "category": item.category,
+            "order_index": item.order_index,
+            "completed": item.completed,
+        }
+        if item.stage == RoadmapStage.FOUNDATIONS:
+            short_term.append(row)
+        else:
+            stages.setdefault(item.grade, []).append(row)
 
     goal = db.get(Goal, goal_id) if goal_id else None
     progress = progress_percent(db, user, goal_id)
-    return {"goal": goal, "stages": stages, "progress_percent": progress}
+    return {"goal": goal, "stages": stages, "short_term": short_term, "progress_percent": progress}
 
 
 def toggle_roadmap_item(db: Session, user: User, item_id: int) -> RoadmapItem | None:
@@ -567,6 +623,36 @@ def _clean_priorities(raw: list) -> list[dict]:
             minutes = 120
         cleaned.append({"skill_category": category, "title": str(p["title"])[:255], "minutes": minutes})
     return cleaned[:3]
+
+
+def _clean_short_items(raw: list) -> list[dict]:
+    cleaned = []
+    for item in raw if isinstance(raw, list) else []:
+        if not item.get("title"):
+            continue
+        category = item.get("category", "build")
+        if category not in ("build", "explore", "grow"):
+            category = "build"
+        cleaned.append(
+            {
+                "category": category,
+                "title": str(item["title"])[:255],
+                "description": str(item.get("description", "")),
+            }
+        )
+    return cleaned[:8]
+
+
+def _template_short(goal_title: str) -> list[dict]:
+    steps = [
+        ("Pin down what you want", "Write a one-paragraph description of this goal in your own words.", "explore"),
+        ("List three first actions", "Identify the three smallest things you can start this week.", "build"),
+        ("Set a weekly rhythm", "Block 3 focused hours each week for this goal.", "grow"),
+    ]
+    return [
+        {"category": category, "title": title, "description": f"{desc} (toward: {goal_title})"}
+        for title, desc, category in steps
+    ]
 
 
 def _template_roadmap(goal_title: str) -> list[dict]:

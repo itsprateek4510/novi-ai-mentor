@@ -1,3 +1,6 @@
+import re
+from difflib import SequenceMatcher
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -13,7 +16,7 @@ from app.services.providers import dna_dict, gemini, memory
 def search_careers(db: Session, q: str | None = None, category: str | None = None, limit: int = 50) -> list[Career]:
     stmt = select(Career)
     if category:
-        stmt = stmt.where(Career.category == category)
+        stmt = stmt.where(Career.category.ilike(category))
     if q:
         needle = f"%{q.lower()}%"
         stmt = stmt.where(
@@ -49,6 +52,8 @@ def career_detail(db: Session, career: Career, user: User | None = None) -> dict
         "future_paths": career.future_paths or [],
         "salary_range": career.salary_range,
         "outlook": career.outlook,
+        "ranking_profile": career.ranking_profile,
+        "country_rankings": career.country_rankings or [],
         "fit_rating": None,
         "reasons": None,
     }
@@ -73,42 +78,176 @@ def list_career_matches(db: Session, user: User) -> list[CareerMatch]:
     return list(db.scalars(stmt))
 
 
-async def match_careers(db: Session, user: User, request: CareerMatchRequest) -> list[CareerMatch]:
-    dna = get_or_create_dna(user, db)
-    catalog = [
-        {
-            "slug": c.slug,
-            "title": c.title,
-            "category": c.category,
-            "summary": c.summary[:220],
-            "skills": c.skills or [],
-            "subjects": c.subjects or [],
-            "industries": c.industries or [],
-        }
-        for c in search_careers(db, limit=100)
-    ]
-    if not catalog:
+# ---------------------------------------------------------------------------
+# Deterministic, explainable career matching engine
+# ---------------------------------------------------------------------------
+
+# Each criterion contributes a weighted 0-1 "coverage" ratio to the final
+# 0-100 score. Ratios (not raw token counts) keep scores comparable across
+# careers with different amounts of text.
+MATCH_CRITERIA = (
+    ("skills", 0.30),
+    ("subjects", 0.25),
+    ("interests", 0.20),
+    ("career_zones", 0.15),
+    ("goals", 0.10),
+)
+
+_SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _norm(*parts) -> str:
+    """Normalize one or more strings into a lowercase searchable key."""
+    return " ".join(str(p).lower() for p in parts if p is not None).strip()
+
+
+def _tokens(text: str) -> set[str]:
+    """Significant lowercase tokens (drops 1-letter and pure number tokens)."""
+    return {t for t in _SLUG_RE.split(text.lower()) if len(t) > 1 and not t.isdigit()}
+
+
+def _career_text(c: Career) -> str:
+    """Searchable blob for a career: title + category + everything descriptive."""
+    return _norm(
+        c.title,
+        c.category,
+        c.summary,
+        c.description,
+        c.what_they_do,
+        *(c.skills or []),
+        *(c.subjects or []),
+        *(c.degrees or []),
+        *(c.industries or []),
+        *(c.future_paths or []),
+    )
+
+
+def _contains(item: str, blob: str) -> bool:
+    """True if a student phrase appears in the career blob (full phrase or its
+    content words — so 'cloud engineering' also hits careers that mention
+    'cloud' or 'engineering' independently)."""
+    key = _SLUG_RE.sub(" ", item).strip()
+    if not key:
+        return False
+    if key in blob:
+        return True
+    it_tokens = _tokens(key)
+    if not it_tokens:
+        return False
+    blob_tokens = _tokens(blob)
+    return bool(it_tokens & blob_tokens)
+
+
+_REASON_TEMPLATES = {
+    "interests": "Your interest in '{0}' shows up in what this career actually does.",
+    "skills": "Your skill '{0}' is something this career relies on daily.",
+    "subjects": "You study '{0}' — a key academic foundation for this field.",
+    "career_zones": "Your career zone '{0}' is exactly where this career sits.",
+    "goals": "This career is a direct path toward your goal: '{0}'.",
+}
+
+
+def _overlap_ratio(student_items: list[str] | None, career_blob: str) -> tuple[float, list[str]]:
+    """Fraction of the student's items found inside the career text (0->1)."""
+    items = [str(i).strip().lower() for i in (student_items or []) if str(i).strip()]
+    if not items:
+        return 0.0, []
+    hits = []
+    seen = set()
+    for it in items:
+        lower = it.lower()
+        if _contains(lower, career_blob) and lower not in seen:
+            hits.append(lower)
+            seen.add(lower)
+    return len(hits) / len(items), hits
+
+
+def _career_matches_excluded(c: Career, excluded: list | None) -> list[str]:
+    """Which revoked topics this career is strongly about (title/category first)."""
+    if not excluded:
         return []
+    title = _norm(c.title, c.category)
+    blob = _career_text(c)
 
-    matches = None
-    try:
-        result = await gemini.complete_json(
-            prompts.career_match_prompt(catalog, dna_dict(dna), request.focus),
-            system=prompts.CAREER_MATCH_SYSTEM,
-        )
-        if isinstance(result, dict) and isinstance(result.get("matches"), list):
-            matches = result["matches"]
-    except Exception as exc:
-        print(f"[careers] LLM match failed, using heuristic fallback: {exc}")
+    def hits(needle: str, haystack: str) -> bool:
+        key = _SLUG_RE.sub(" ", needle).strip()
+        if not key:
+            return False
+        if key in haystack:
+            return True
+        nt = _tokens(key)
+        return bool(nt and nt & _tokens(haystack))
 
-    validated = _validate_matches(db, matches, catalog) if matches else _heuristic_matches(db, user, catalog)
+    suppressed = []
+    for phrase in excluded:
+        if not str(phrase).strip():
+            continue
+        # Strong signal: appears in the career's name/category -> hard suppress.
+        if hits(phrase, title):
+            suppressed.append(phrase)
+        # Softer signal: appears deep in the description -> strong discount.
+        elif hits(phrase, blob):
+            suppressed.append(phrase)
+    return suppressed
 
+
+def _score_career(c: Career, dna) -> tuple[float, list[str]]:
+    """Score a single career against the student's DNA.
+
+    Returns (score 0-100, reasons). The score is a weighted average of how
+    much of the student's DNA each criterion finds in this career. A sqrt
+    curve spreads mid-range results so scores read naturally. Careers tied to
+    a topic the student has explicitly ruled out (dna.excluded) are capped so
+    they can never win the top spot even if other DNA overlaps.
+    """
+    blob = _career_text(c)
+    covered_weight = 0.0
+    weighted = 0.0
+    reasons: list[str] = []
+    for field, weight in MATCH_CRITERIA:
+        items = getattr(dna, field, None) or []
+        ratio, hits = _overlap_ratio(items, blob)
+        covered_weight += weight
+        weighted += weight * ratio
+        if hits:
+            reasons.append(_REASON_TEMPLATES[field].format(hits[0]))
+    ratio = weighted / covered_weight if covered_weight else 0.0
+    score = round(100 * (ratio ** 0.7), 1)
+
+    excluded = getattr(dna, "excluded", None) or []
+    suppressed = _career_matches_excluded(c, excluded)
+    if suppressed:
+        for ph in suppressed[:2]:
+            topic = str(ph).strip().lower()
+            reasons.append(f"You told Novi you're stepping away from {topic or 'this'} — so this career is not in the running.")
+        # Hard cap: revoked-topic careers can't beat an honest 30% floor.
+        score = min(score, 28.0)
+
+    return score, reasons[:4]
+
+
+def _score_catalog(db: Session, dna) -> list[dict]:
+    """Deterministic scores for every career in the catalog, best first."""
+    catalog = search_careers(db, limit=500)
+    scored = []
+    for c in catalog:
+        base, base_reasons = _score_career(c, dna)
+        scored.append({"slug": c.slug, "score": base, "reasons": base_reasons})
+    scored.sort(key=lambda x: x["score"], reverse=True)
+    return scored
+
+
+def _store_matches(
+    db: Session, user: User, scored: list[dict], limit: int
+) -> list[CareerMatch]:
+    """Replace the user's stored matches with the top `limit` from `scored`."""
+    top = [m for m in scored if m["score"] > 0][:limit]
     for old in list_career_matches(db, user):
         db.delete(old)
     db.commit()
 
     stored: list[CareerMatch] = []
-    for rank, m in enumerate(validated[: request.limit], start=1):
+    for rank, m in enumerate(top, start=1):
         career = db.scalar(select(Career).where(Career.slug == m["slug"]))
         if not career:
             continue
@@ -124,6 +263,67 @@ async def match_careers(db: Session, user: User, request: CareerMatchRequest) ->
     db.commit()
     for cm in stored:
         db.refresh(cm)
+    return stored
+
+
+def rescore_matches(db: Session, user: User, limit: int = 1) -> list[CareerMatch]:
+    """Recompute the student's stored top match straight from their current DNA.
+
+    Runs after any DNA change (chat refresh, manual edit, auto-extraction) so
+    the Careers page always reflects what they believe now — no stale picks.
+    """
+    dna = get_or_create_dna(user, db)
+    scored = _score_catalog(db, dna)
+    stored = _store_matches(db, user, scored, limit)
+    if stored:
+        memory.archive(
+            user,
+            f"User's top career match updated to {stored[0].career.title} "
+            f"(fit {round(stored[0].score)}%).",
+            ("career", "match"),
+        )
+    return stored
+
+
+async def match_careers(db: Session, user: User, request: CareerMatchRequest) -> list[CareerMatch]:
+    dna = get_or_create_dna(user, db)
+    scored = _score_catalog(db, dna)
+
+    # 2) Gemini may only *refine* the top candidates' reasons — the ordering
+    #    and scores always stay deterministic and logical.
+    top_n = [s["slug"] for s in scored[:10]]
+    catalog = search_careers(db, limit=500)
+    top_details = [
+        {
+            "slug": c.slug,
+            "title": c.title,
+            "category": c.category,
+            "summary": (c.summary or "")[:220],
+            "skills": c.skills or [],
+            "subjects": c.subjects or [],
+            "industries": c.industries or [],
+        }
+        for c in catalog
+        if c.slug in top_n
+    ]
+    if top_details:
+        try:
+            result = await gemini.complete_json(
+                prompts.career_match_prompt(top_details, dna_dict(dna), request.focus),
+                system=prompts.CAREER_MATCH_SYSTEM,
+            )
+            if isinstance(result, dict) and isinstance(result.get("matches"), list):
+                llm_reasons = {m["slug"]: m.get("reasons") for m in result["matches"] if isinstance(m, dict)}
+                for item in scored:
+                    extra = llm_reasons.get(item["slug"])
+                    if isinstance(extra, list) and extra:
+                        item["reasons"] = [str(r) for r in extra][:4]
+        except Exception as exc:
+            print(f"[careers] LLM reason refinement skipped: {exc}")
+
+    scored.sort(key=lambda x: x["score"], reverse=True)
+    stored = _store_matches(db, user, scored, request.limit)
+
     if stored:
         memory.archive(
             user,
@@ -132,56 +332,6 @@ async def match_careers(db: Session, user: User, request: CareerMatchRequest) ->
             ("career", "match"),
         )
     return stored
-
-
-def _validate_matches(db: Session, matches: list[dict], catalog: list[dict]) -> list[dict]:
-    valid_slugs = {c["slug"] for c in catalog}
-    cleaned = []
-    for m in matches:
-        slug = (m or {}).get("slug", "")
-        try:
-            score = float(m.get("score", 0))
-        except (TypeError, ValueError):
-            score = 0
-        if slug in valid_slugs and score >= 55:
-            reasons = m.get("reasons") or []
-            if not isinstance(reasons, list):
-                reasons = []
-            cleaned.append({"slug": slug, "score": score, "reasons": [str(r) for r in reasons]})
-    cleaned.sort(key=lambda x: x["score"], reverse=True)
-    return cleaned
-
-
-def _heuristic_matches(db: Session, user: User, catalog: list[dict]) -> list[dict]:
-    """Deterministic fallback: score by keyword overlap with the student's DNA."""
-    dna = get_dna(user, db)
-    buckets = {
-        "interests": dna.interests or [],
-        "skills": dna.skills or [],
-        "career_zones": dna.career_zones or [],
-        "subjects": dna.subjects or [],
-    } if dna else {}
-
-    interest_tokens = set()
-    for item in buckets.values():
-        for entry in item:
-            interest_tokens.update(str(entry).lower().split())
-
-    scored = []
-    for c in catalog:
-        blob = " ".join(
-            [c["title"], c["category"], c["summary"]]
-            + (c.get("skills") or [])
-            + (c.get("subjects") or [])
-            + (c.get("industries") or [])
-        ).lower()
-        blob_tokens = set(blob.split())
-        overlap = blob_tokens & interest_tokens
-        score = min(95, 40 + len(overlap) * 12)
-        reasons = [f"You seem drawn to things related to {list(overlap)[0]}" ] if overlap else []
-        scored.append({"slug": c["slug"], "score": score, "reasons": reasons})
-    scored.sort(key=lambda x: x["score"], reverse=True)
-    return [s for s in scored if s["score"] >= 50][:10]
 
 
 # ---------------------------------------------------------------------------

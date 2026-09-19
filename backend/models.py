@@ -14,9 +14,10 @@ class User(Base):
     grade = Column(Integer)
     school = Column(String(255))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     is_active = Column(Boolean, default=True)
     letta_agent_id = Column(String(255))
+    role = Column(Enum("student", "parent"), nullable=False, default="student", server_default="student")
     
     # Relationships
     conversations = relationship("Conversation", back_populates="user")
@@ -32,7 +33,7 @@ class Conversation(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     title = Column(String(255))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     
     # Relationships
     user = relationship("User", back_populates="conversations")
@@ -62,7 +63,7 @@ class CareerDNA(Base):
     interests = Column(JSON)
     career_zones = Column(JSON)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     
     # Relationships
     user = relationship("User", back_populates="career_dna")
@@ -78,7 +79,7 @@ class Goal(Base):
     status = Column(Enum("active", "completed", "paused"), default="active")
     target_date = Column(Date)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     
     # Relationships
     user = relationship("User", back_populates="goals")

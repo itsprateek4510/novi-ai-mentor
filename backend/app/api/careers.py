@@ -22,10 +22,21 @@ async def list_careers(
 
 @router.get("/categories")
 async def categories(db: Session = Depends(get_db)):
-    from sqlalchemy import select
+    from sqlalchemy import select, func
+    from app.db.career_catalog import normalize_category
     from app.models.career import Career
 
-    return list(db.scalars(select(Career.category).distinct().order_by(Career.category)))
+    raw = list(db.scalars(select(func.distinct(Career.category))))
+    seen: set[str] = set()
+    canonical: list[str] = []
+    for cat in sorted(raw, key=lambda x: x.lower()):
+        label = normalize_category(cat)
+        key = label.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        canonical.append(label)
+    return canonical
 
 
 @router.get("/matches", response_model=list[CareerMatchOut])

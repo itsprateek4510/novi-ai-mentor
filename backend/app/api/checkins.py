@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.deps import get_current_student
 from app.models.user import User
-from app.schemas.checkin import CheckinCreate, CheckinOut, CheckinSummaryOut
+from app.schemas.checkin import CheckinCreate, CheckinOut, CheckinSummaryOut, ContributionGraphOut
 from app.services import checkins as checkin_service
 from app.services import state_sync
 
@@ -38,6 +38,15 @@ async def save_checkin(
     result = checkin_service.save_answers(db, user, data)
     _sync(user, db)
     return result
+
+
+@router.get("/graph", response_model=ContributionGraphOut)
+async def contribution_graph(
+    weeks: int = 53,
+    user: User = Depends(get_current_student),
+    db: Session = Depends(get_db),
+):
+    return checkin_service.contribution_graph(db, user, weeks)
 
 
 @router.post("/summarize", response_model=CheckinOut)

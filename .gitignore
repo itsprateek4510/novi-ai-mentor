@@ -30,3 +30,7 @@ env/
 # Docker / local data
 data/
 pgdata/
+
+# Frontend build artifacts
+frontend/node_modules/
+frontend/dist/

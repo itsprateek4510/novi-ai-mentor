@@ -2,7 +2,7 @@
 "use strict";
 
 const API = "/api/v1";
-const state = { token: localStorage.getItem("novi_token") || null, user: JSON.parse(localStorage.getItem("novi_user") || "null") },
+const state = { token: (() => { const t = localStorage.getItem("novi_token"); return t && t !== "undefined" ? t : null; })(), user: (() => { try { const u = JSON.parse(localStorage.getItem("novi_user") || "null"); return u && typeof u === "object" ? u : null; } catch { return null; } })() },
       view = document.getElementById("view"),
       loader = document.getElementById("loader"),
       appEl = document.getElementById("app"),
@@ -78,37 +78,6 @@ let _dnaCtx = null;
 async function getDnaContext() {
   try { _dnaCtx = await api("/dna/context"); } catch (_) { _dnaCtx = { filled: false }; }
   return _dnaCtx;
-}
-
-function dnaBarHTML(c, section) {
-  if (!c || !c.filled) {
-    return `
-      <div class="card novi-box mb">
-        <span class="novi-avatar">N</span>
-        <span>Everything on this page personalises from your Career DNA.</span>
-        <a href="#dna" class="small" style="color:var(--accent)">Set your direction now →</a>
-      </div>`;
-  }
-  const notes = {
-    careers: () => `Novi builds every match and "why this could be you" from your DNA. Your strongest signal right now is <b>${esc(c.top_zone || c.top_interest || "your interests")}</b> — start with the matches ranked highest below.`,
-    universities: () => `The programs below are weighted toward your DNA${c.top_zone ? `, with the strongest alignment in <b>${esc(c.top_zone)}</b>` : ""}${c.subjects && c.subjects.length ? ` and your subjects <b>${esc(c.subjects.slice(0, 3).join(", "))}</b>` : ""}.`,
-    roadmap: () => `Your roadmap and weekly priorities are generated around what matters to you${c.top_goal ? ` — <b>${esc(c.top_goal)}</b>` : ""}. Tick steps off and Novi carries your progress forward.`,
-    passport: () => `Novi reads your passport as proof of your DNA. With your direction at <b>${esc(c.top_zone || c.top_interest || "not set yet")}</b>, the highest-value additions are the ones that prove that story.`,
-    checkin: () => `Novi weighs every check-in against the goals in your DNA${c.goals && c.goals.length ? ` — <b>${esc(c.goals.slice(0, 2).join("</b> and <b>"))}</b>` : ""}.`,
-  };
-  const chips = [];
-  if (c.top_zone) chips.push(`<span class="chip acc">${esc(c.top_zone)}</span>`);
-  (c.career_zones || []).slice(1, 3).forEach((z) => chips.push(`<span class="chip">${esc(z)}</span>`));
-  (c.interests || []).slice(0, 2).forEach((i) => chips.push(`<span class="chip">${esc(i)}</span>`));
-  return `
-    <div class="card novi-box mb">
-      <div class="between">
-        <h3 style="margin:0">Based on your Career DNA</h3>
-        <a href="#dna" class="small" style="color:var(--accent)">View DNA →</a>
-      </div>
-      <p class="small" style="margin-top:8px">${notes[section]()}</p>
-      ${chips.length ? `<div class="row" style="margin-top:10px">${chips.join("")}</div>` : ""}
-    </div>`;
 }
 
 /* ---------------------------------------------------------------- auth flow */
@@ -274,53 +243,113 @@ function allowedFirst() { return state.user.role === "parent" ? "overview" : "da
 
 window.addEventListener("hashchange", () => state.token && dispatch());
 
-/* ---------------------------------------------------------------- profile */
+/* ---------------------------------------------------------------- settings */
+function settingsAvatar(name) {
+  const p = String(name || "NOVI").trim().split(/\s+/).filter(Boolean);
+  return (p[0]?.[0] || "N").toUpperCase() + (p[1]?.[0] || "").toUpperCase();
+}
+
 async function renderProfile() {
   const u = state.user;
   showLoader(true); view.innerHTML = "";
   let updated = state._profileMsg || ""; delete state._profileMsg;
+  const isStudent = u.role === "student";
+  const firstName = u.first_name || u.name || "";
+  const initialsTxt = settingsAvatar(firstName || u.email);
+  const joined = u.created_at ? new Date(String(u.created_at).length === 10 ? u.created_at + "T00:00:00" : u.created_at).toLocaleDateString([], { year: "numeric", month: "short" }) : "—";
   view.innerHTML = `
-    <div class="hero"><h1>My Profile</h1><p>Your account details — used to personalize every part of NOVI.</p></div>
-    <div class="cols">
-      <div class="card">
-        ${updated ? `<div class="card novi-box mb" style="padding:12px 16px"><span class="novi-avatar">N</span>${esc(updated)}</div>` : ""}
-        <h2>Update details</h2>
-        <div class="field mt"><label>Email</label><input value="${esc(u.email || "")}" disabled></div>
-        <div class="field"><label>Role</label><input value="${esc(u.role || "")}" disabled></div>
-        <div class="field"><label>Name</label><input id="pf-name" value="${esc(u.first_name || u.name || "")}"></div>
-        ${u.role === "student" ? `
-        <div class="field"><label>Grade</label><input id="pf-grade" type="number" min="9" max="12" value="${u.grade || ""}"></div>
-        <div class="field"><label>School</label><input id="pf-school" value="${esc(u.school || "")}"></div>` : ""}
-        <button class="btn" id="pf-save">Save changes</button>
+    <div class="hero"><h1>Settings</h1><p>Your account, personal details and security.</p></div>
+    ${updated ? `<div class="card novi-box mb" style="padding:12px 16px"><span class="novi-avatar">N</span><span>${esc(updated)}</span></div>` : ""}
+
+    <div class="settings">
+      <div class="card settings-account">
+        <div class="pf-avatar">${esc(initialsTxt)}</div>
+        <h3>${esc(firstName || u.email)}</h3>
+        <p class="small muted">${esc(u.email)}</p>
+        <p class="small muted">${isStudent ? "Student" : "Parent"} · Member since ${esc(joined)}</p>
+        ${isStudent && u.grade ? `<span class="pill mid">Grade ${esc(u.grade)}</span>` : ""}
+        <div class="acc-actions">
+          <button class="btn-ghost" id="pf-refresh">↻ Refresh account</button>
+          <button class="btn-ghost" id="pf-logout">Log out</button>
+        </div>
       </div>
-      <div class="card">
-        <h2>How this helps</h2>
-        <ul class="plain mt">
-          <li>NOVI remembers your grade, school and interests to give age-appropriate advice.</li>
-          <li>Your Career DNA powers all career matching and roadmaps.</li>
-          <li>Your parents can follow your progress if you're linked.</li>
-          <li>Weekly check-ins tune your mentors' focus areas.</li>
-        </ul>
-        <button class="btn-ghost mt" id="pf-reset">Refresh my full profile</button>
+
+      <div class="settings-main">
+        <div class="card settings-card">
+          <div class="sc-head"><span class="sc-icon">👤</span><h2>Profile details</h2></div>
+          <p class="small muted sc-desc">Used to personalize advice, roadmaps and university matches.</p>
+          <div class="form-grid">
+            <div class="field"><label>First name</label><input id="pf-first" value="${esc(firstName.split(" ")[0] || "")}"></div>
+            <div class="field"><label>Last name</label><input id="pf-last" value="${esc(firstName.split(" ").slice(1).join(" ") || u.last_name || "")}"></div>
+            <div class="field"><label>Email</label><input value="${esc(u.email || "")}" disabled></div>
+            <div class="field"><label>Role</label><input value="${esc(isStudent ? "Student" : "Parent")}" disabled></div>
+            ${isStudent ? `
+            <div class="field"><label>Grade</label><input id="pf-grade" type="number" min="9" max="12" value="${u.grade || ""}"></div>
+            <div class="field"><label>School</label><input id="pf-school" value="${esc(u.school || "")}"></div>` : ""}
+          </div>
+          <div class="form-actions"><button class="btn" id="pf-save">Save changes</button></div>
+        </div>
+
+        <div class="card settings-card">
+          <div class="sc-head"><span class="sc-icon">🔒</span><h2>Security</h2></div>
+          <p class="small muted sc-desc">Update your password to keep your account secure.</p>
+          <div class="form-grid">
+            <div class="field"><label>Current password</label><input id="pw-current" type="password" autocomplete="current-password"></div>
+            <div class="field"><label>New password (6+ chars)</label><input id="pw-new" type="password" autocomplete="new-password"></div>
+          </div>
+          <div class="field"><label>Confirm new password</label><input id="pw-confirm" type="password" autocomplete="new-password"></div>
+          <div class="form-actions"><button class="btn" id="pw-save">Update password</button><span class="form-note muted" id="pw-result"></span></div>
+        </div>
+
+        <div class="card settings-card">
+          <div class="sc-head"><span class="sc-icon">🛡️</span><h2>About your data</h2></div>
+          <ul class="plain mt">
+            <li>👤 Your profile details personalize age-appropriate advice.</li>
+            ${isStudent ? `
+            <li>🧬 Your Career DNA powers career matching, roadmaps and university readiness.</li>
+            <li>💬 Chat history teaches Novi who you are becoming — change it anytime in My DNA.</li>
+            <li>👪 Your parents can view your progress if you're linked to them.</li>` : `
+            <li>🧠 Parent Advisor gives you a focused view of your child's journey.</li>`}
+          </ul>
+        </div>
       </div>
     </div>`;
-  view.querySelector("#pf-save").addEventListener("click", async () => {
+
+  const saveProfile = async () => {
     showLoader(true);
     try {
-      const payload = { first_name: view.querySelector("#pf-name").value.trim() };
+      const first = view.querySelector("#pf-first").value.trim();
+      const last = view.querySelector("#pf-last").value.trim();
+      const payload = { first_name: first, last_name: last };
       if (view.querySelector("#pf-grade")) payload.grade = view.querySelector("#pf-grade").value ? Number(view.querySelector("#pf-grade").value) : null;
       if (view.querySelector("#pf-school")) payload.school = view.querySelector("#pf-school").value;
       const me = await api("/auth/me", { method: "PATCH", body: JSON.stringify(payload) });
       state.user = me; localStorage.setItem("novi_user", JSON.stringify(state.user));
+      renderShell();
       state._profileMsg = "Profile saved ✨";
       location.hash = "profile"; renderProfile();
     } catch (ex) { toast(ex.message); }
     finally { showLoader(false); }
-  });
-  view.querySelector("#pf-reset").addEventListener("click", async () => {
+  };
+  view.querySelector("#pf-save").addEventListener("click", saveProfile);
+  view.querySelector("#pf-refresh").addEventListener("click", async () => {
     showLoader(true);
-    try { const me = await api("/auth/me"); state.user = me; localStorage.setItem("novi_user", JSON.stringify(state.user)); toast("Profile refreshed ✓"); renderProfile(); }
+    try { const me = await api("/auth/me"); state.user = me; localStorage.setItem("novi_user", JSON.stringify(state.user)); toast("Account refreshed ✓"); renderProfile(); }
     catch (ex) { toast(ex.message); }
+    finally { showLoader(false); }
+  });
+  view.querySelector("#pf-logout").addEventListener("click", logout);
+  view.querySelector("#pw-save").addEventListener("click", async () => {
+    const cur = view.querySelector("#pw-current").value, next = view.querySelector("#pw-new").value, conf = view.querySelector("#pw-confirm").value;
+    const resEl = view.querySelector("#pw-result");
+    if (!cur || !next) { resEl.innerHTML = `<span style="color:var(--warn)">Please fill in current and new password.</span>`; return; }
+    if (next !== conf) { resEl.innerHTML = `<span style="color:var(--bad)">New passwords don't match.</span>`; return; }
+    showLoader(true);
+    try {
+      await api("/auth/change-password", { method: "POST", body: JSON.stringify({ current_password: cur, new_password: next }) });
+      view.querySelector("#pw-current").value = ""; view.querySelector("#pw-new").value = ""; view.querySelector("#pw-confirm").value = "";
+      resEl.innerHTML = `<span style="color:var(--good)">Password updated ✓</span>`;
+      } catch (ex) { resEl.innerHTML = `<span style="color:var(--bad)">${esc(ex.message)}</span>`; }
     finally { showLoader(false); }
   });
   showLoader(false);
@@ -331,11 +360,14 @@ async function renderDashboard() {
   showLoader(true); view.innerHTML = "";
   try {
     const d = await api("/dashboard");
+    const contrib = await api("/checkins/graph").catch(() => null);
     const p = d.progress || {};
     const num = (v) => (typeof v === "number" ? Math.round(v) : typeof v === "string" ? v : "—");
     const pct = (v) => (typeof v === "number" ? `${Math.round(v)}%` : v === undefined || v === null ? "—" : `${v}%`);
     const firstName = (state.user.first_name || state.user.name || "there").split(" ")[0];
-    const activeGoals = (d.goals || []).filter((g) => g.status === "active");
+    const goals = d.goals || [];
+    const activeGoals = goals.filter((g) => g.status === "active");
+    const pausedGoals = goals.filter((g) => g.status === "paused");
     const steps = d.roadmap_items || [];
     const stepsDone = steps.filter((i) => i.completed).length;
     const prios = d.priorities || [];
@@ -350,10 +382,19 @@ async function renderDashboard() {
     const rm = num(p.roadmap_progress);
     const passSugg = (d.passport_completion && d.passport_completion.suggested_next) ? ` · ${String(d.passport_completion.suggested_next).toLowerCase()}` : "";
 
-    const doAction =
-      d.next_task ? { kind: "task", id: d.next_task.id, label: d.next_task.title }
-      : prioOpen[0] ? { kind: "priority", id: prioOpen[0].id, label: prioOpen[0].title }
+    const focus = d.today_focus || null;
+    const doAction = !focus ? null
+      : focus.kind === "task" ? { kind: "task", id: focus.id, label: focus.title }
+      : focus.kind === "roadmap" ? { kind: "roadmap", id: focus.id, label: focus.title }
+      : focus.kind === "priority" ? { kind: "priority", id: focus.id, label: focus.title }
       : null;
+
+    const crownSub =
+      activeGoals.length
+        ? `Chasing <b>${esc(activeGoals[0].title)}</b>${activeGoals.length > 1 ? ` +${activeGoals.length - 1} more goal${activeGoals.length > 2 ? "s" : ""}` : ""}`
+        : pausedGoals.length ? `Goal <b>${esc(pausedGoals[0].title)}</b> is on hold — resume it to light the map`
+        : goals.length ? `Goal <b>${esc(goals[0].title)}</b> is done — set your next one`
+        : "Set your first goal to light the map";
 
     const getOb = async () => { try { return await api("/onboarding"); } catch (_) { return null; } };
     const ob = await getOb();
@@ -381,7 +422,7 @@ async function renderDashboard() {
           <div>
             <div class="kicker" style="margin:0">your momentum</div>
             <h2 style="color:${dirColor}">${esc(dir)}</h2>
-            <p class="small muted" style="margin-top:3px">${activeGoals.length ? `Chasing <b>${esc(activeGoals[0].title)}</b>${activeGoals.length > 1 ? ` +${activeGoals.length - 1} more goal${activeGoals.length > 2 ? "s" : ""}` : ""} dream` : "Set your first goal to light the map"}</p>
+            <p class="small muted" style="margin-top:3px">${crownSub}</p>
           </div>
         </div>
         <div class="dash-chips">
@@ -414,11 +455,13 @@ async function renderDashboard() {
         </div>` : ""}
 
       <div class="mini-cards">
-        ${mini(activeGoals.length ? "🗺️" : "🎯", "Goals & roadmap", activeGoals.length ? `<b>${stepsDone}/${steps.length}</b> steps done across ${activeGoals.length} active goal${activeGoals.length > 1 ? "s" : ""}` : "No active goals yet — start your map", "Roadmap", "roadmap")}
+        ${mini(goals.length ? "🗺️" : "🎯", "Goals & roadmap", activeGoals.length ? `<b>${stepsDone}/${steps.length}</b> steps done across ${activeGoals.length} active goal${activeGoals.length > 1 ? "s" : ""}` : pausedGoals.length ? `Goal <b>${esc(pausedGoals[0].title)}</b> is on hold · resume it to start your map` : steps.length ? `<b>${stepsDone}/${steps.length}</b> steps done` : "No goals yet — start your map", "Roadmap", "roadmap")}
         ${mini("💼", "Top career", topCareer ? `<b>${esc(topCareer.career.emoji || "🎯")} ${esc(topCareer.career.title)}</b> · <span style="color:${ringColor(topCareer.score)}">${Math.round(topCareer.score)}% match</span>` : "Chat with Novi to discover your path", "Careers", "careers")}
         ${mini("🏅", "Passport", d.passport_completion ? `<b>${passportScore}%</b> complete${passSugg}` : "Add your first win", "Passport", "passport")}
         ${mini("📅", "This week", prioOpen.length ? `<b>${(d.priorities || []).length - prioOpen.length}/${(d.priorities || []).length}</b> done · next: ${esc(prioOpen[0].title)}` : "All priorities done. Nice!", "Roadmap", "roadmap")}
       </div>
+
+      ${contrib ? contributionGraphHTML(contrib) : ""}
 
       <div class="card novi-strip">
         <span class="novi-avatar">N</span>
@@ -429,6 +472,7 @@ async function renderDashboard() {
       <button class="fab" id="dash-fab" title="Chat with Novi">💬 <span>Novi</span></button>`;
 
     const go = (route) => () => { location.hash = route; };
+    attachGraphTooltips(view);
     document.querySelectorAll("[data-go]").forEach((el) => el.addEventListener("click", go(el.dataset.go)));
     ["#dash-chat", "#dash-chat2", "#dash-chat3", "#dash-fab"].forEach((sel) => {
       const el = view.querySelector(sel); if (el) el.addEventListener("click", () => { location.hash = "chat"; });
@@ -440,6 +484,7 @@ async function renderDashboard() {
       showLoader(true);
       try {
         if (doAction.kind === "task") await api(`/roadmap/tasks/${doAction.id}`, { method: "PATCH", body: JSON.stringify({ status: "done" }) });
+        else if (doAction.kind === "roadmap") await api(`/roadmap/items/${doAction.id}`, { method: "PATCH" });
         else await api(`/roadmap/priorities/${doAction.id}`, { method: "PATCH" });
         toast("Nice work — knocked it out ✓"); renderDashboard();
       } catch (ex) { toast(ex.message); showLoader(false); }
@@ -484,6 +529,7 @@ async function renderChat() {
           <div class="chat-input">
             <input id="chat-text" placeholder="Ask Novi anything…" autocomplete="off">
             <button class="btn chat-send" id="chat-send" title="Send">➤</button>
+            <button class="btn btn-archive" id="chat-archive" title="Archive this message">💾</button>
           </div>
         </div>
       </div>`;
@@ -538,6 +584,18 @@ async function loadConversation(cid) {
   renderMessages();
 }
 
+function openConversation(cid) {
+  if (location.hash !== "chat") location.hash = "chat";
+  else if (state.token) renderChat();
+  let tries = 0;
+  const poll = setInterval(() => {
+    tries += 1;
+    const el = document.querySelector(`[data-cid="${cid}"]`);
+    if (el) { clearInterval(poll); loadConversation(cid); el.closest(".conv-item") && el.scrollIntoView({ block: "nearest" }); }
+    else if (tries > 30) { clearInterval(poll); loadConversation(cid); }
+  }, 120);
+}
+
 function msgTime(m) {
   const t = m.created_at || m.createdAt || m.timestamp;
   if (!t) return "";
@@ -569,6 +627,8 @@ async function sendChat() {
     const res = await api("/chat", { method: "POST", body: JSON.stringify({ message: text, conversation_id: activeConversationId }) });
     activeConversationId = res.conversation_id;
     chatHistory.push({ role: "assistant", content: res.message, created_at: new Date().toISOString() });
+    // Archive the user's message to Letta memory
+    await api("/memory/archive", { method: "POST", body: JSON.stringify({ fact: text, tags: ["chat"] }) });
     renderMessages();
     const convos = await api("/chat/conversations");
     const list = document.querySelector("#conv-list");
@@ -585,20 +645,62 @@ async function sendChat() {
 async function renderDna() {
   showLoader(true); view.innerHTML = "";
   try {
-    const dna = await api("/dna");
+    const [dna, conversations] = await Promise.all([
+      api("/dna"),
+      api("/chat/conversations").catch(() => []),
+    ]);
     const field = (key, label, ph) => `<div class="field"><label>${label}</label><input data-field="${key}" placeholder="${ph}" value="${esc((dna[key] || []).join(", "))}"></div>`;
+    const sources = dna.sources || {};
+    const mapping = [["interests", "Interests"], ["skills", "Skills"], ["subjects", "Subjects"], ["goals", "Goals"], ["career_zones", "Career zones"], ["values", "Values"], ["traits", "Traits"], ["motivations", "Motivations"], ["strengths", "Strengths"]];
+    const evidenceOf = (k) => {
+      const block = (sources[k] || []).filter((e) => e.quote).map((e) => {
+        const cid = e.conversation_id;
+        const quote = e.quote.length > 160 ? e.quote.slice(0, 160) + "…" : e.quote;
+        const link = cid ? `<div class="q-link"><a class="small" style="color:var(--accent)" href="#chat" onclick="openConversation(${cid})">open chat →</a></div>` : "";
+        return `<div class="dna-evidence"><span class="chip">${esc(e.value)}</span><div class="dna-quote">“${esc(quote)}”${link}</div></div>`;
+      }).join("");
+      return block;
+    };
+    const withEvidence = mapping.filter(([k]) => (sources[k] || []).some((e) => e.quote));
+    const chatCount = (conversations || []).length;
+    const updated = dna.updated_at ? new Date(dna.updated_at + "Z").toLocaleDateString([], { month: "short", day: "numeric" }) : "never";
     view.innerHTML = `
-      <div class="hero">${kicker("Your living map")}<h1>My Career DNA</h1><p>The map Novi builds about who you are. Update it, or let Novi refresh it from your chats.</p></div>
+      <div class="hero">
+        ${kicker("Know yourself")}
+        <h1>My Career DNA</h1>
+        <p>Novi reads every conversation you have with her and turns it into a living picture of who you are — interests, strengths, goals, the zones you keep gravitating toward.</p>
+      </div>
+      <div class="card novi-box mb">
+        <div class="row">
+          <span class="novi-avatar">N</span>
+          <div style="flex:1">
+            <b>How Novi learns about you</b>
+            <div class="small muted">Every ${chatCount ? `${chatCount} conversation${chatCount > 1 ? "s" : ""} · last update ${updated}` : "chat with her and she listens"} → your DNA updates automatically. No forms, just talking.</div>
+          </div>
+        </div>
+        <div class="dna-steps mt">
+          <span class="chip">💬 You talk</span><span class="dna-arrow">→</span><span class="chip">🧠 Novi listens</span><span class="dna-arrow">→</span><span class="chip">🧬 DNA extracts</span>
+        </div>
+        <button class="btn mt" id="refresh-dna">🔄 Refresh from my chats</button>
+      </div>
       <div class="card novi-box mb">
         <h3 class="mb">Novi's reflection</h3>
-        <span class="novi-avatar">N</span><span>${dna.novi_reflection ? esc(dna.novi_reflection) : "Your reflection fills here after you chat about your interests."}</span>
+        <span class="novi-avatar mb">N</span><span>${dna.novi_reflection ? esc(dna.novi_reflection) : "Chat about your interests and Novi's reflection will fill here."}</span>
         <div class="row mt">
           <button class="btn" id="refl-yes">Yes, that's me ✓</button>
           <button class="btn-ghost" id="refl-no">Not quite</button>
         </div>
       </div>
-      ${dna.dna_filled ? pill("DNA ready", "good") : `<span class="pill">Not yet finalised</span>`}
-      <div class="section-title">Edit DNA</div>
+      ${dna.dna_filled ? pill("DNA ready", "good") : `<span class="pill">Still learning about you</span>`}
+      ${withEvidence.length ? `<div class="section-title">What Novi picked up from your chats</div>
+      <div class="card mb">${withEvidence.map(([k, l]) => `<div class="mb"><h3 class="dna-sec">${esc(l)}</h3><div class="evidence-wrap">${evidenceOf(k)}</div></div>`).join("")}</div>` : `
+      <div class="card mb"><p class="small muted">No chat evidence yet — start a conversation in <a href="#chat" style="color:var(--accent)">Chat</a> and Novi will extract your DNA from what you say.</p></div>`}
+      <div class="section-title">Currently mapped</div>
+      <div class="cols">
+        ${[["interests", "Interests"], ["strengths", "Strengths"], ["subjects", "Subjects"], ["goals", "Goals"], ["career_zones", "Career zones"], ["values", "Values"]].map(([k, l]) => `
+          <div class="card"><h3>${l}</h3><div class="dna-tag-row mt">${(dna[k] || []).map((t) => `<span class="chip">${esc(t)}</span>`).join("") || `<span class="muted small">Not set yet</span>`}</div></div>`).join("")}
+      </div>
+      <div class="section-title">Fine-tune by hand (optional)</div>
       <div class="card">
         ${field("interests", "Interests", "robotics, AI, music…")}
         ${field("subjects", "Subjects you enjoy", "maths, computer science…")}
@@ -608,14 +710,8 @@ async function renderDna() {
         ${field("values", "Values", "creativity, impact…")}
         <div class="row">
           <button class="btn" id="save-dna">Save DNA</button>
-          <button class="btn-ghost" id="refresh-dna">Refresh from chats</button>
           ${!dna.dna_filled ? `<button class="btn-ghost" id="finalize-dna">Finalize DNA ✓</button>` : `<span class="chip acc">DNA locked · ready for matching</span>`}
         </div>
-      </div>
-      <div class="section-title">Currently mapped</div>
-      <div class="cols">
-        ${[["interests", "Interests"], ["strengths", "Strengths"], ["subjects", "Subjects"], ["goals", "Goals"], ["career_zones", "Career zones"], ["values", "Values"]].map(([k, l]) => `
-          <div class="card"><h3>${l}</h3><div class="dna-tag-row mt">${(dna[k] || []).map((t) => `<span class="chip">${esc(t)}</span>`).join("") || `<span class="muted small">Not set yet</span>`}</div></div>`).join("")}
       </div>`;
     view.querySelector("#save-dna").addEventListener("click", async () => {
       const payload = {};
@@ -626,10 +722,25 @@ async function renderDna() {
       finally { showLoader(false); }
     });
     view.querySelector("#refresh-dna").addEventListener("click", async () => {
-      showLoader(true);
-      try { await api("/dna/refresh", { method: "POST" }); toast("DNA refreshed from your chats 🧬"); location.hash = "dna"; renderDna(); }
-      catch (ex) { toast(ex.message); }
-      finally { showLoader(false); }
+      const btn = view.querySelector("#refresh-dna");
+      const old = btn.textContent;
+      btn.textContent = "🧠 Reading your conversations…";
+      btn.disabled = true;
+      showLoader(false);
+      let done = false;
+      const steps = ["🧠 Reading your conversations…", "🔍 Picking out signals…", "🧬 Extracting your DNA…"];
+      const ticker = setInterval(() => {
+        btn.textContent = steps[(steps.indexOf(btn.textContent) + 1) % steps.length];
+      }, 900);
+      try {
+        await api("/dna/refresh", { method: "POST" });
+        done = true;
+        toast("DNA refreshed from your chats 🧬");
+        location.hash = "dna"; renderDna();
+      } catch (ex) {
+        toast(ex.message);
+        btn.textContent = old; btn.disabled = false;
+      } finally { clearInterval(ticker); }
     });
     const finBtn = view.querySelector("#finalize-dna");
     if (finBtn) finBtn.addEventListener("click", async () => {
@@ -663,24 +774,26 @@ let careerFilter = "";
 async function renderCareers() {
   showLoader(true); view.innerHTML = "";
   try {
-    const [dctx, list, categories, savedMatches] = await Promise.all([
-      getDnaContext(), api("/careers?limit=50"), api("/careers/categories"), api("/careers/matches").catch(() => []),
+    const [list, categories, savedMatches] = await Promise.all([
+      api("/careers?limit=50"), api("/careers/categories"), api("/careers/matches").catch(() => []),
     ]);
     const matchMap = {};
     (savedMatches || []).forEach((m) => { matchMap[m.career.slug] = m.score; });
-    const matchCard = (m, i) => `
-      <div class="list-item mb" style="cursor:pointer" data-m-slug="${esc(m.career.slug)}">
+    const FAMOUS_CATS = ["Technology", "Science", "Marketing", "Law", "Finance", "Engineering", "Business"];
+    const filterCats = (categories || []).filter((c) => FAMOUS_CATS.includes(String(c).trim()));
+    const topMatchCard = (m) => `
+      <div class="list-item top-match mb" style="cursor:pointer" data-m-slug="${esc(m.career.slug)}">
         <div class="row">
-          <div class="num-badge">${i + 1}</div>
+          <div class="num-badge">#1</div>
           <div style="flex:1"><b>${m.career.emoji} ${esc(m.career.title)}</b>
-            <div class="small muted">best fit for your DNA</div></div>
+            <div class="small muted">the one career Novi rates highest for you right now</div></div>
           <b style="color:${ringColor(m.score)}">${Math.round(m.score)}%</b>
         </div>
         <ul class="plain mt">${(m.reasons || []).map((r) => `<li class="small">${esc(r)}</li>`).join("")}</ul>
       </div>`;
     view.innerHTML = `
       <div class="hero">${kicker("Explore verified paths")}<h1>Career Explorer</h1><p>There are thousands of careers you've never heard of. Novi surfaces the ones that could be <b style="color:var(--text)">you</b>.</p></div>
-      ${dnaBarHTML(dctx, "careers")}
+      
       <div class="card mb">
         <div class="career-search">
           <input id="career-q" placeholder="Search careers, interests or skills — try ‘AI’, ‘design’, ‘finance’…">
@@ -688,10 +801,10 @@ async function renderCareers() {
         </div>
         <div class="cat-row">
           <button class="cat-pill on" data-cat="">All</button>
-          ${(categories || []).map((c) => `<button class="cat-pill" data-cat="${esc(c)}">${esc(c)}</button>`).join("")}
+          ${filterCats.map((c) => `<button class="cat-pill" data-cat="${esc(c)}">${esc(c)}</button>`).join("")}
         </div>
         <div id="match-result" class="mt">
-          ${(savedMatches || []).length ? `<div class="section-title">Your AI matches</div>${savedMatches.map(matchCard).join("")}` : ""}
+          ${(savedMatches || []).length ? `<div class="section-title">Your #1 career match</div>${topMatchCard(savedMatches[0])}` : ""}
         </div>
       </div>
       <div class="career-grid" id="career-grid">
@@ -706,6 +819,7 @@ async function renderCareers() {
             <div class="cc-title">${esc(c.title)}</div>
             <div class="cc-meta">${esc(c.salary_range || c.category)}</div>
             <p class="cc-summary">${esc(c.summary)}</p>
+            ${(c.country_rankings || []).length ? `<div class="country-row" title="Best countries for this career">${c.country_rankings.map((ct, i) => `<span class="country-flag${i ? "" : " top"}">${esc(ct)}</span>`).join('<span class="country-arrow">→</span>')}</div>` : ""}
             <div class="cc-foot">
               ${matchMap[c.slug] !== undefined ? `<div class="progress-track"><div class="progress-fill" style="width:${matchMap[c.slug]}%;background:${ringColor(matchMap[c.slug])}"></div></div>` : ""}
               <span class="small muted">View career →</span>
@@ -716,9 +830,9 @@ async function renderCareers() {
     const applyFilters = () => {
       const t = q.value.toLowerCase();
       const on = view.querySelector(".cat-pill.on");
-      const cat = on ? on.dataset.cat : "";
+      const cat = on ? (on.dataset.cat || "").toLowerCase() : "";
       view.querySelectorAll("[data-slug]").forEach((el) => {
-        const inCat = !cat || (el.dataset.catList || "") === cat;
+        const inCat = !cat || ((el.dataset.catList || "").toLowerCase() === cat);
         const inQuery = !t || el.textContent.toLowerCase().includes(t);
         el.classList.toggle("hidden", !(inCat && inQuery));
       });
@@ -738,9 +852,8 @@ async function renderCareers() {
     view.querySelector("#career-match").addEventListener("click", async () => {
       showLoader(true);
       try {
-        const dna = await api("/dna");
-        const res = await api("/careers/match", { method: "POST", body: JSON.stringify({ interests: dna.interests, subjects: dna.subjects, skills: dna.skills }) });
-        document.querySelector("#match-result").innerHTML = `<div class="section-title">Top matches for you</div>` + res.map(matchCard).join("");
+        const res = await api("/careers/match", { method: "POST", body: JSON.stringify({ limit: 1, focus: q.value?.trim() || null }) });
+        document.querySelector("#match-result").innerHTML = `<div class="section-title">Your #1 career match</div>` + (res.length ? topMatchCard(res[0]) : `<p class="small muted">No strong match yet — keep refining your DNA or searching.</p>`);
         document.querySelector("#match-result").addEventListener("click", (e) => {
           const el = e.target.closest("[data-m-slug]"); if (el) location.hash = "career/" + el.dataset.mSlug;
         });
@@ -755,14 +868,15 @@ async function renderCareerDetail() {
   const slug = location.hash.slice(1).split("/")[1];
   showLoader(true); view.innerHTML = "";
   try {
-    const [dctx, c] = await Promise.all([getDnaContext(), api(`/careers/${slug}`)]);
+    const c = await api(`/careers/${slug}`);
     const stepIcon = { project: "🛠️", skill: "📈", explore: "🔎" };
     const chips = (arr, cls = "") => (arr && arr.length ? `<div class="tag-list">${arr.map((s) => `<span class="chip ${cls}">${esc(s)}</span>`).join("")}</div>` : `<p class="small muted">Not mapped yet.</p>`);
     const facts = [
-      ["Salary range", c.salary_range || "Varies"],
-      ["Career outlook", c.outlook || "—"],
-      ["Degrees that lead here", (c.degrees || []).length ? c.degrees.join(" · ") : "—"],
-      ["Industries", (c.industries || []).length ? c.industries.join(" · ") : "—"],
+      ["Salary range", c.salary_range || "Varies", true],
+      ["Career outlook", c.outlook || "—", true],
+      ["Best countries", (c.country_rankings || []).length ? `<span class="country-row country-row-inline">${c.country_rankings.map((ct, i) => `<span class="country-flag${i ? "" : " top"}">${esc(ct)}</span>`).join('<span class="country-arrow">→</span>')}</span>` : "—", false],
+      ["Degrees that lead here", (c.degrees || []).length ? c.degrees.join(" · ") : "—", true],
+      ["Industries", (c.industries || []).length ? c.industries.join(" · ") : "—", true],
     ].filter(([, v]) => v && v !== "—");
     view.innerHTML = `
       <div class="hero">
@@ -772,7 +886,7 @@ async function renderCareerDetail() {
         <p>${esc(c.summary)}</p>
         <span class="chip acc" id="fit-chip" style="margin-top:10px;display:none"></span>
       </div>
-      ${dnaBarHTML(dctx, "careers")}
+      
       <div id="novi-fit" class="mb">
         <div class="card novi-box"><span class="novi-avatar">N</span><span class="small muted">Novi is working out how well this fits you…</span></div>
       </div>
@@ -784,7 +898,7 @@ async function renderCareerDetail() {
             ${c.description && c.what_they_do ? `<p class="career-desc mt">${esc(c.description)}</p>` : ""}
           </div>
           <div class="fact-grid">
-            ${facts.map(([k, v]) => `<div class="fact"><div class="f-label">${esc(k)}</div><div class="f-value">${esc(v)}</div></div>`).join("")}
+            ${facts.map(([k, v, safe]) => `<div class="fact"><div class="f-label">${esc(k)}</div><div class="f-value">${safe ? esc(v) : v}</div></div>`).join("")}
           </div>
           <div class="card">
             <div class="block-title">Your next steps</div>
@@ -855,42 +969,50 @@ async function renderCareerDetail() {
 async function renderUniversities() {
   showLoader(true); view.innerHTML = "";
   try {
-    const [dctx, filters, rows, recommended] = await Promise.all([
-      getDnaContext(), api("/universities/filters"), api("/universities?limit=30"), api("/universities/recommended").catch(() => []),
+    const [filters, rows] = await Promise.all([
+      api("/universities/filters"), api("/universities?limit=30"),
     ]);
-    const uniCard = (u) => `
+    let activeSubject = "";
+    const subjLabel = (s) => (filters.subject_labels && filters.subject_labels[s]) || s || "";
+    const uniRank = (u) => {
+      if (activeSubject && u.rankings && typeof u.rankings[activeSubject] === "number") return u.rankings[activeSubject];
+      return u.ranking;
+    };
+    const uniCard = (u) => {
+      const r = activeSubject ? uniRank(u) : null;
+      const caption = r == null && !activeSubject
+        ? (uniRank(u) == null ? "" : `Top subject: #${uniRank(u)} in ${esc(u.course || u.subject || "")}`)
+        : `Ranked #${r} in ${activeSubject ? esc(subjLabel(activeSubject)) : esc(u.course || u.subject || "")}`;
+      return `
       <div class="card list-item" style="cursor:pointer" data-slug="${esc(u.slug)}">
-        <div class="between"><h3>${esc(u.name)}</h3><span class="pill mid">#${u.ranking || "—"}</span></div>
+        <div class="between"><h3>${esc(u.name)}</h3>${r == null ? "" : `<span class="pill mid">#${r}</span>`}</div>
         <p class="small mt">${esc(u.course)} · ${esc(u.country)} · ${esc(u.city)}</p>
+        ${caption ? `<p class="small muted mt">${caption}</p>` : ""}
       </div>`;
-    const uniReadinessCard = (m) => `
-      <div class="card list-item" style="cursor:pointer" data-slug="${esc((m.university||{}).slug || "")}">
-        <div class="between"><h3>${esc((m.university||{}).name || "")}</h3><span class="pill mid">#${(m.university||{}).ranking || "—"}</span></div>
-        <div class="row mt"><div class="progress-track" style="flex:1"><div class="progress-fill" style="width:${m.readiness}%;background:${ringColor(m.readiness)}"></div></div><b style="color:${ringColor(m.readiness)}">${Math.round(m.readiness)}%</b></div>
-        ${m.reason ? `<p class="small muted mt">${esc(m.reason)}</p>` : ""}
-      </div>`;
+    };
     const s = async () => {
       const params = new URLSearchParams({ limit: "30" });
       const country = document.querySelector("#uni-country").value, subject = document.querySelector("#uni-subject").value;
+      activeSubject = subject;
       if (country) params.set("country", country); if (subject) params.set("subject", subject);
       const newRows = await api(`/universities?${params}`);
       const grid = document.querySelector("#uni-grid");
       grid.innerHTML = newRows.map(uniCard).join("");
     };
     view.innerHTML = `
-      <div class="hero">${kicker("Find your program")}<h1>University Explorer</h1><p>Global programs, weighted to your DNA and your readiness.</p></div>
-      ${dnaBarHTML(dctx, "universities")}
-      ${(recommended || []).length ? `
-        <div class="card mb">
-          <h2>Recommended for you</h2><p class="small muted">Ranked by alignment with your Career DNA</p>
-          <div class="cols mt" style="grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px">
-            ${recommended.map(uniReadinessCard).join("")}
-          </div>
-        </div>` : ""}
+      <div class="hero">${kicker("Find your program")}<h1>University Explorer</h1><p>Real QS 2026 rankings and programs from 1,900+ universities worldwide.</p></div>
+      
+      <div class="card mb" style="background:linear-gradient(135deg,var(--panel-2),var(--panel))">
+        <div class="between">
+          <div><h2 style="margin:0">🤖 Ask Novi which is best</h2><p class="small muted" style="margin:6px 0 0">Web-informed advice based on your Career DNA and real QS data.</p></div>
+          <button class="btn" id="uni-advice-btn">Ask Novi 🎓</button>
+        </div>
+        <div id="uni-advice" class="mt"></div>
+      </div>
       <div class="card mb">
         <div class="cols" style="gap:12px">
           <div class="field" style="margin:0"><label>Country</label><select id="uni-country"><option value="">All</option>${filters.countries.map((c) => `<option>${esc(c)}</option>`).join("")}</select></div>
-          <div class="field" style="margin:0"><label>Subject</label><select id="uni-subject"><option value="">All</option>${filters.subjects.map((c) => `<option>${esc(c)}</option>`).join("")}</select></div>
+          <div class="field" style="margin:0"><label>Subject</label><select id="uni-subject"><option value="">All</option>${filters.subjects.map((c) => `<option value="${esc(c)}">${esc(filters.subject_labels?.[c] || c)}</option>`).join("")}</select></div>
         </div>
       </div>
       <div class="cols" id="uni-grid">${rows.map(uniCard).join("")}</div>`;
@@ -902,6 +1024,24 @@ async function renderUniversities() {
     view.querySelectorAll("[data-slug]").forEach((el) => {
       if (!el.closest("#uni-grid")) el.addEventListener("click", () => { location.hash = "university/" + el.dataset.slug; });
     });
+    const adviceBox = view.querySelector("#uni-advice"), adviceBtn = view.querySelector("#uni-advice-btn");
+    adviceBtn.addEventListener("click", async () => {
+      adviceBtn.disabled = true; adviceBtn.textContent = "Novi is thinking…";
+      adviceBox.innerHTML = `<div class="small muted">Novi is searching the web and comparing programs for you…</div>`;
+      try {
+        const subject = document.querySelector("#uni-subject").value;
+        const adv = await api("/universities/advice", { method: "POST", body: JSON.stringify({ question: "Which university is best for me?", subject: subject || undefined }) });
+        const lines = String(adv.answer || "").split("\n").filter(Boolean);
+        const sources = (adv.sources || []).filter((x) => x.uri);
+        adviceBox.innerHTML = `
+          <div class="row" style="gap:8px"><span class="novi-avatar">N</span><div style="flex:1">
+            ${lines.map((l) => `<p class="small mb">${l}</p>`).join("")}
+            ${sources.length ? `
+              <div class="small muted mt"><b>Sources</b><ul class="plain">${sources.slice(0, 5).map((x) => `<li>🔗 <a href="${esc(x.uri)}" target="_blank" rel="noopener">${esc(x.title || x.domain || x.uri)}</a></li>`).join("")}</ul></div>` : ""}
+          </div></div>`;
+      } catch (ex) { adviceBox.innerHTML = `<p class="small" style="color:var(--bad)">${esc(ex.message)}</p>`; }
+      adviceBtn.disabled = false; adviceBtn.textContent = "Ask Novi 🎓";
+    });
   } catch (ex) { view.innerHTML = emptyState("Universities unavailable", ex.message); }
   finally { showLoader(false); }
 }
@@ -910,10 +1050,10 @@ async function renderUniversityDetail() {
   const slug = location.hash.slice(1).split("/")[1];
   showLoader(true); view.innerHTML = "";
   try {
-    const [dctx, u] = await Promise.all([getDnaContext(), api(`/universities/${slug}`)]);
+    const u = await api(`/universities/${slug}`);
     view.innerHTML = `
-      <div class="hero"><a href="#universities" class="small" style="color:var(--accent)">← All universities</a><h1 class="mt">${esc(u.name)}</h1><p>${esc(u.city)}, ${esc(u.country)} · <b>${esc(u.course)}</b> · Rank #${u.ranking || "—"}</p></div>
-      ${dnaBarHTML(dctx, "universities")}
+      <div class="hero"><a href="#universities" class="small" style="color:var(--accent)">← All universities</a><h1 class="mt">${esc(u.name)}</h1><p>${esc(u.city)}, ${esc(u.country)} · <b>${esc(u.course)}</b> · Ranked #${u.ranking || "—"} in ${esc(u.course || u.subject || "")}</p></div>
+      
       <div class="cols">
         <div class="card"><h2>About</h2><p class="mt">${esc(u.about)}</p>
           <h3 class="mt">Entry requirements</h3><p class="mt small">${esc(u.entry_requirements)}</p></div>
@@ -922,6 +1062,8 @@ async function renderUniversityDetail() {
           <h3 class="mt">Strengths</h3><ul class="plain">${(u.strengths || []).map((s) => `<li>${esc(s)}</li>`).join("") || `<li class="muted">—</li>`}</ul>
           <button class="btn mt" id="readiness-btn">Check my readiness</button>
           <div id="readiness-result" class="mt"></div>
+          <button class="btn-ghost mt" id="uni-detail-advice-btn">🤖 Ask Novi which is best</button>
+          <div id="uni-detail-advice" class="mt"></div>
         </div>
       </div>`;
     view.querySelector("#readiness-btn").addEventListener("click", async () => {
@@ -938,6 +1080,23 @@ async function renderUniversityDetail() {
       } catch (ex) { toast(ex.message); }
       finally { showLoader(false); }
     });
+    const dAdviceBtn = view.querySelector("#uni-detail-advice-btn"), dAdvice = view.querySelector("#uni-detail-advice");
+    dAdviceBtn.addEventListener("click", async () => {
+      dAdviceBtn.disabled = true; dAdviceBtn.textContent = "Novi is thinking…";
+      dAdvice.innerHTML = `<div class="small muted">Novi is searching the web and comparing programs…</div>`;
+      try {
+        const adv = await api("/universities/advice", { method: "POST", body: JSON.stringify({ question: `Is ${u.name} the best fit for me?`, university_ids: [u.id] }) });
+        const lines = String(adv.answer || "").split("\n").filter(Boolean);
+        const sources = (adv.sources || []).filter((x) => x.uri);
+        dAdvice.innerHTML = `
+          <div class="row" style="gap:8px"><span class="novi-avatar">N</span><div style="flex:1">
+            ${lines.map((l) => `<p class="small mb">${l}</p>`).join("")}
+            ${sources.length ? `
+              <div class="small muted mt"><b>Sources</b><ul class="plain">${sources.slice(0, 5).map((x) => `<li>🔗 <a href="${esc(x.uri)}" target="_blank" rel="noopener">${esc(x.title || x.domain || x.uri)}</a></li>`).join("")}</ul></div>` : ""}
+          </div></div>`;
+      } catch (ex) { dAdvice.innerHTML = `<p class="small" style="color:var(--bad)">${esc(ex.message)}</p>`; }
+      dAdviceBtn.disabled = false; dAdviceBtn.textContent = "🤖 Ask Novi which is best";
+    });
   } catch (ex) { view.innerHTML = emptyState("University not found", ex.message); }
   finally { showLoader(false); }
 }
@@ -948,6 +1107,7 @@ const STAGE_META = {
   explore: { icon: "🧭", label: "Explore & Experiment", desc: "Broaden horizons, test ideas and build habits." },
   build: { icon: "🛠️", label: "Build Your Profile", desc: "Create projects and evidence of your skill." },
   apply: { icon: "🚀", label: "Apply With Confidence", desc: "Applications, decisions and the next chapter." },
+  foundations: { icon: "⚡", label: "Short-term · do this now", desc: "Your immediate next steps from what you told Novi." },
 };
 const PP_CATS = {
   projects: { icon: "🛠️", label: "Projects" },
@@ -969,15 +1129,16 @@ async function renderRoadmap() {
   showLoader(true); view.innerHTML = "";
   const scrollY = window.scrollY;
   try {
-    const [dctx, goals, priorities, tasks] = await Promise.all([
-      getDnaContext(), api("/roadmap/goals").catch(() => []), api("/roadmap/priorities").catch(() => []), api("/roadmap/tasks").catch(() => []),
+    const [goals, priorities, tasks] = await Promise.all([
+      api("/roadmap/goals").catch(() => []), api("/roadmap/priorities").catch(() => []), api("/roadmap/tasks").catch(() => []),
     ]);
     const activeGoals = (goals || []).filter((g) => g.status === "active");
     if (!activeGoals.some((g) => _rmGoalId && String(g.id) === String(_rmGoalId))) _rmGoalId = activeGoals.length ? activeGoals[0].id : null;
     const roadmap = await api("/roadmap" + (_rmGoalId ? `?goal_id=${_rmGoalId}` : "")).catch(() => ({ goal: null, stages: {}, progress_percent: 0 }));
     const stages = roadmap.stages || {};
+    const shortTerm = roadmap.short_term || [];
     const gradeKeys = Object.keys(stages).filter((g) => (stages[g] || []).length).sort((a, b) => Number(a) - Number(b));
-    const allItems = gradeKeys.flatMap((g) => stages[g]);
+    const allItems = [...shortTerm, ...gradeKeys.flatMap((g) => stages[g])];
     const doneCount = allItems.filter((i) => i.completed).length;
     const pct = Math.round(roadmap.progress_percent || 0);
     const prioDone = (priorities || []).filter((p) => p.completed).length;
@@ -1046,7 +1207,7 @@ async function renderRoadmap() {
         <h1>My <span class="grad">Roadmap</span></h1>
         <p>Goals become a grade-by-grade roadmap. Tick steps off — Novi carries your momentum forward.</p>
       </div>
-      ${dnaBarHTML(dctx, "roadmap")}
+      
 
       <div class="stats-strip">
         <div class="stat-mini"><span class="sm-ico">🎯</span><div><b>${activeGoals.length}</b><span>active goals</span></div></div>
@@ -1093,12 +1254,45 @@ async function renderRoadmap() {
                   <button class="btn" id="rm-generate">✨ Generate roadmap</button>
                 </div>` : ""}
             </div>
+            ${goal && goal.status === "active" ? `
+            <div class="row mt gen-box">
+              <input id="rm-text" placeholder="What do you want? e.g. build an AI project and get into a top engineering college" style="flex:1;min-width:200px">
+              <button class="btn" id="rm-gen-text">⚡ Make my plan</button>
+            </div>` : ""}
             ${allItems.length ? `
               <div class="row between mt">
                 <div class="progress-track" style="flex:1"><div class="progress-fill" style="width:${pct}%"></div></div>
                 <b style="color:${ringColor(pct)}">${pct}%</b>
               </div>` : ""}
           </div>
+
+          ${shortTerm.length ? `
+          <div class="card" id="short-term-block">
+            <div class="between">
+              <div>
+                <h2>⚡ Short-term · do this now</h2>
+                <div class="small muted mt">${shortTerm.filter((i) => i.completed).length} of ${shortTerm.length} short-term steps done</div>
+              </div>
+              <span class="pill mid">now</span>
+            </div>
+            <div class="tl-items mt">
+              ${shortTerm.map((it) => `
+                <div class="rm-item ${it.completed ? "done" : ""}" data-item="${it.id}">
+                  <label class="rm-check" title="${it.completed ? "Mark as not done" : "Mark done"}">
+                    <input type="checkbox" ${it.completed ? "checked" : ""} data-toggle="${it.id}">
+                    <span class="rm-checkbox">✓</span>
+                  </label>
+                  <div class="rm-body">
+                    <div class="rm-top">
+                      <b>${esc(it.title)}</b>
+                      <span class="rm-stage stage-${esc(it.stage)}">${esc(it.stage)}</span>
+                      ${it.completed ? `<span class="pill good">done</span>` : ""}
+                    </div>
+                    ${it.description ? `<p class="small muted rm-desc">${esc(it.description)}</p>` : ""}
+                  </div>
+                </div>`).join("")}
+            </div>
+          </div>` : ""}
 
           ${gradeKeys.length ? `
             <div class="timeline">${gradeKeys.map(gradeBlock).join("")}</div>
@@ -1162,6 +1356,16 @@ async function renderRoadmap() {
       try { await api("/roadmap/generate", { method: "POST", body: JSON.stringify({ goal_id: _rmGoalId }) }); await renderRoadmap(); toast("Roadmap generated 🌱"); }
       catch (ex) { toast(ex.message); showLoader(false); }
     }));
+    const rmGenText = view.querySelector("#rm-gen-text"); const rmText = view.querySelector("#rm-text");
+    const genFromText = async () => {
+      const t = (rmText.value || "").trim();
+      if (!t) { toast("Tell Novi what you want first"); return; }
+      showLoader(true);
+      try { await api("/roadmap/generate", { method: "POST", body: JSON.stringify({ goal_id: _rmGoalId, text: t }) }); await renderRoadmap(); toast("Short-term + long-term roadmap generated 🌱"); }
+      catch (ex) { toast(ex.message); showLoader(false); }
+    };
+    if (rmGenText) rmGenText.addEventListener("click", genFromText);
+    if (rmText) rmText.addEventListener("keydown", (e) => { if (e.key === "Enter") genFromText(); });
     const rmDone = view.querySelector("#rm-done"); if (rmDone) rmDone.addEventListener("click", async () => {
       if (!confirm("Mark this goal as done?")) return;
       try { await api(`/roadmap/goals/${_rmGoalId}`, { method: "PATCH", body: JSON.stringify({ status: "done" }) }); toast("Goal complete — congratulations 🎉"); reload("", false); }
@@ -1206,7 +1410,7 @@ async function renderRoadmap() {
   finally { showLoader(false); window.scrollTo(0, scrollY); }
 }
 
-/* ---------------------------------------------------------------- passport v2 */
+/* ---------------------------------------------------------------- passport v3 (LinkedIn-style profile) */
 let _ppFilter = "all", _ppEditing = null, _ppCache = [];
 async function renderPassport() {
   showLoader(true); view.innerHTML = "";
@@ -1215,112 +1419,166 @@ async function renderPassport() {
       getDnaContext(), api("/passport").catch(() => []), api("/passport/completion").catch(() => ({ score: 0 })),
     ]);
     _ppCache = items;
-    const firstName = state.user.first_name || state.user.name || "Student";
+    const firstName = (state.user.first_name || state.user.name || "Student");
     const lastName = state.user.last_name || "";
+    const fullName = `${firstName} ${lastName}`.trim();
     const byCat = (c) => items.filter((i) => i.category === c);
     const verifiedCount = items.filter((i) => i.verified).length;
     const covered = Object.keys(comp.by_category || {}).filter((c) => (comp.by_category[c] || 0) > 0);
     const skillSet = [...new Set(items.flatMap((i) => (i.skills || []).map((s) => String(s).trim()).filter(Boolean)))];
     const dnaFocus = (dctx && (dctx.label || dctx.top_zone)) || comp.dna_focus || "";
-    const headline = dnaFocus ? `${dnaFocus.toUpperCase()} PORTFOLIO` : "CAREER PORTFOLIO";
-    const skillPool = skillSet.length ? skillSet.slice(0, 10) : (dctx && (dctx.skills || []).slice(0, 6) || []);
+    const skillPool = skillSet.length ? skillSet.slice(0, 12) : (dctx && (dctx.skills || []).slice(0, 6) || []);
     const score = comp.score || 0;
     const editing = _ppEditing ? items.find((i) => i.id === _ppEditing) : null;
+    const avatar = (state.user && state.user.avatar) || "";
+    const avatarHTML = avatar
+      ? `<img src="${esc(avatar)}" alt="Profile photo">`
+      : `<span class="ln-avatar-initials">${initials(fullName)}</span>`;
 
-    const pfCard = (i) => `
-      <div class="pf-card ${i.verified ? "verified" : ""}">
-        <div class="pf-card-top">
-          <div class="pf-ico">${PP_CATS[i.category]?.icon || "⭐"}</div>
-          <div class="row" style="gap:6px">
-            ${i.verified ? `<span class="pill good">✓ verified</span>` : `<span class="pill mid">${esc(PP_CATS[i.category]?.label || i.category)}</span>`}
+    const lnEntry = (i) => {
+      const cat = PP_CATS[i.category] || { icon: "⭐", label: i.category };
+      return `
+      <div class="ln-entry ${i.verified ? "ln-verified" : ""}" data-pp-id="${i.id}">
+        <div class="ln-entry-ico">${cat.icon}</div>
+        <div class="ln-entry-body">
+          <div class="ln-entry-top">
+            <div class="ln-entry-title">${esc(i.title)}
+              ${i.verified ? `<span class="ln-badge" title="Verified by Novi">✓</span>` : ""}
+            </div>
+            <div class="ln-entry-actions">
+              <button class="btn-ghost tiny" data-pp-edit="${i.id}">Edit</button>
+              <button class="btn-ghost tiny danger" data-pp-del="${i.id}">Delete</button>
+            </div>
           </div>
-        </div>
-        <h3 class="pf-card-title">${esc(i.title)}</h3>
-        ${i.date_achieved ? `<div class="pf-date">📅 ${prettyDate(i.date_achieved)}</div>` : ""}
-        ${i.description ? `<p class="small muted pf-desc">${esc(i.description)}</p>` : ""}
-        ${(i.skills || []).length ? `<div class="tag-list">${i.skills.map((s) => `<span class="chip acc">${esc(s)}</span>`).join("")}</div>` : ""}
-        <div class="pf-actions">
-          <button class="btn-ghost small" data-pp-edit="${i.id}">Edit</button>
-          <button class="btn-ghost small" style="color:var(--bad)" data-pp-del="${i.id}">Delete</button>
-          ${i.certificate_url ? `<a class="btn-ghost small" href="${esc(i.certificate_url)}" target="_blank" rel="noopener">View proof ↗</a>` : ""}
+          <div class="ln-entry-meta">
+            <span>${cat.label}</span>
+            ${i.date_achieved ? `<span class="dot"></span><span>📅 ${prettyDate(i.date_achieved)}</span>` : ""}
+            ${i.certificate_url ? `<span class="dot"></span><a href="${esc(i.certificate_url)}" target="_blank" rel="noopener">Proof ↗</a>` : ""}
+          </div>
+          ${i.description ? `<p class="ln-entry-desc">${esc(i.description)}</p>` : ""}
+          ${(i.skills || []).length ? `<div class="tag-list" style="margin:6px 0 0">${i.skills.map((s) => `<span class="chip acc">${esc(s)}</span>`).join("")}</div>` : ""}
         </div>
       </div>`;
+    };
 
     const filtered = _ppFilter === "all" ? items : items.filter((i) => i.category === _ppFilter);
-    const formTitle = editing ? "Edit entry" : "Add an achievement";
+    const formTitle = editing ? "Edit entry" : "Add to your passport";
 
     view.innerHTML = `
       <div class="hero">
         ${kicker("Your evidence of growth")}
-        <h1>Career <span class="grad">Passport</span></h1>
+        <h1>My Career <span class="grad">Passport</span></h1>
         <p>Every project, win and experience that proves your potential — one polished portfolio of proof.</p>
       </div>
-      ${dnaBarHTML(dctx, "passport")}
+      
 
-      <div class="pf-cover">
-        <div class="pf-cover-bg"></div>
-        <div class="pf-cover-inner">
-          <div class="pf-avatar">${initials(firstName + " " + lastName)}</div>
-          <div style="min-width:0">
-            <div class="pf-country">NOVI · Career Passport</div>
-            <h1 class="pf-name">${esc(firstName)} ${lastName ? `<span class="grad">${esc(lastName)}</span>` : ""}</h1>
-            <div class="pf-headline">${esc(headline)}</div>
+      <div class="ln-profile">
+        <div class="ln-cover">
+          <div class="ln-cover-bg"></div>
+          <span class="ln-cover-tag">NOVI · PASSION TO PROOF</span>
+        </div>
+        <div class="ln-avatar-wrap">
+          <div class="ln-avatar">${avatarHTML}</div>
+          <button class="ln-camera" id="ln-camera" title="${avatar ? "Change photo" : "Add a photo"}">📷</button>
+          <input type="file" id="ln-file" accept="image/*" hidden>
+        </div>
+        <div class="ln-head">
+          <div class="ln-id">
+            <h1 class="ln-name">${esc(firstName)} ${lastName ? `<span class="grad">${esc(lastName)}</span>` : ""}</h1>
+            <div class="ln-headline">${esc(headlineFor(dctx, comp))}</div>
+            <div class="ln-loc">
+              ${state.user.school ? `<span>🏫 ${esc(state.user.school)}</span>` : ""}
+              ${state.user.grade ? `<span class="dot"></span><span>Grade ${esc(state.user.grade)}</span>` : ""}
+              <span class="dot"></span><span>Career Passport</span>
+            </div>
           </div>
-          <div class="pf-score">
-            ${ringHTML(score, Math.round(score) + "%", 70)}
-            <div class="small muted">profile score</div>
+          <div class="ln-cta">
+            <button class="btn ln-refresh" id="ln-refresh">↻ Refresh from chat</button>
+            <button class="btn-ghost" id="ln-add">＋ Add achievement</button>
           </div>
         </div>
-        <div class="pf-stats">
-          <div><b>${items.length}</b><span>entries</span></div>
-          <div><b style="color:var(--good)">${verifiedCount}</b><span>verified</span></div>
-          <div><b style="color:var(--accent-2)">${covered.length}</b><span>categories</span></div>
-          <div><b style="color:${ringColor(score)}">${skillPool.length}</b><span>skills</span></div>
+        <div class="ln-stats">
+          ${stat("Entries", items.length, "normal")}
+          ${stat("Verified", verifiedCount, "good")}
+          ${stat("Categories", covered.length, "accent")}
+          ${stat("Skills", skillPool.length, "warn")}
+          <div class="ln-score-cell">
+            ${ringHTML(score, Math.round(score) + "%", 74)}
+            <span class="ln-score-label">profile score</span>
+          </div>
         </div>
       </div>
 
-      ${skillPool.length ? `
-        <div class="card mb">
-          <div class="block-title">Profile strengths</div>
-          <div class="tag-list" style="margin:0">${skillPool.map((s) => `<span class="chip acc">✦ ${esc(s)}</span>`).join("")}</div>
-        </div>` : ""}
+      <div class="ln-grid">
+        <div class="ln-main">
+          <div class="ln-section">
+            <div class="ln-section-head">
+              <div>
+                <h2 class="ln-section-title">${_ppFilter === "all" ? "All achievements" : (PP_CATS[_ppFilter] ? PP_CATS[_ppFilter].label : "Achievements")}</h2>
+                <p class="small muted">${items.length} ${items.length === 1 ? "entry" : "entries"} on your profile</p>
+              </div>
+              <div class="pf-tabs" style="margin:0">
+                <button class="cat-pill ${_ppFilter === "all" ? "on" : ""}" data-cat="all">All · ${items.length}</button>
+                ${Object.entries(PP_CATS).map(([k, v]) => `<button class="cat-pill ${_ppFilter === k ? "on" : ""}" data-cat="${k}">${v.icon} ${v.label} · ${byCat(k).length}</button>`).join("")}
+              </div>
+            </div>
 
-      ${(comp.novi_note || comp.suggested_next) ? `
-        <div class="card novi-box mb">
-          <span class="novi-avatar">N</span>
-          ${comp.novi_note ? `<span class="small">${esc(comp.novi_note)}</span>` : ""}
-          ${comp.suggested_next ? `<div class="small mt"><b style="color:var(--accent-2)">→ ${esc(comp.suggested_next)}</b></div>` : ""}
-        </div>` : ""}
+            <div class="card pf-form ln-form" id="pf-form">
+              <div class="between"><h2>${formTitle}</h2>${editing ? `<button class="btn-ghost small" id="pp-cancel">Cancel</button>` : ""}</div>
+              <div class="cols mt" style="gap:14px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))">
+                <div class="field" style="margin:0"><label>Category</label>
+                  <select id="pp-cat">${Object.entries(PP_CATS).map(([k, v]) => `<option value="${k}" ${editing && editing.category === k ? "selected" : ""}>${v.icon} ${v.label}</option>`).join("")}</select></div>
+                <div class="field" style="margin:0"><label>Date achieved (optional)</label><input id="pp-date" type="date" value="${editing && editing.date_achieved ? (editing.date_achieved || "") : ""}"></div>
+              </div>
+              <div class="field mt"><label>Title</label><input id="pp-title" placeholder="e.g. National Robotics finalist" value="${editing ? esc(editing.title) : ""}"></div>
+              <div class="field"><label>Description</label><textarea id="pp-desc" placeholder="What did you do, and what did it take?">${editing ? esc(editing.description || "") : ""}</textarea></div>
+              <div class="row" style="gap:12px;align-items:flex-end">
+                <div class="field" style="flex:1;margin:0"><label>Skills (comma separated)</label><input id="pp-skills" placeholder="python, data analysis, leadership" value="${editing ? esc((editing.skills || []).join(", ")) : ""}"></div>
+                <button class="btn" id="pp-save">${editing ? "Save changes" : "Add to passport"}</button>
+              </div>
+            </div>
 
-      <div class="card pf-form mb" id="pf-form">
-        <div class="between"><h2>${formTitle}</h2>${editing ? `<button class="btn-ghost small" id="pp-cancel">Cancel</button>` : ""}</div>
-        <div class="cols mt" style="gap:14px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))">
-          <div class="field" style="margin:0"><label>Category</label>
-            <select id="pp-cat">${Object.entries(PP_CATS).map(([k, v]) => `<option value="${k}" ${editing && editing.category === k ? "selected" : ""}>${v.icon} ${v.label}</option>`).join("")}</select></div>
-          <div class="field" style="margin:0"><label>Date achieved (optional)</label><input id="pp-date" type="date" value="${editing && editing.date_achieved ? (editing.date_achieved || "") : ""}"></div>
+            <div id="pf-feed" class="ln-feed">
+              ${filtered.length ? filtered.map(lnEntry).join("") : `
+                <div class="card empty" style="grid-column:1/-1">
+                  <h3>Nothing here yet</h3>
+                  <p class="small muted mt">Add your first ${_ppFilter === "all" ? "achievement" : (PP_CATS[_ppFilter] ? PP_CATS[_ppFilter].label.toLowerCase() : "entry")} — or hit “Refresh from chat” and Novi will scan your chats for proof to add.</p>
+                </div>`}
+            </div>
+          </div>
         </div>
-        <div class="field mt"><label>Title</label><input id="pp-title" placeholder="e.g. National Robotics finalist" value="${editing ? esc(editing.title) : ""}"></div>
-        <div class="field"><label>Description</label><textarea id="pp-desc" placeholder="What did you do, and what did it take?">${editing ? esc(editing.description || "") : ""}</textarea></div>
-        <div class="row" style="gap:12px;align-items:flex-end">
-          <div class="field" style="flex:1;margin:0"><label>Skills (comma separated)</label><input id="pp-skills" placeholder="python, data analysis, leadership" value="${editing ? esc((editing.skills || []).join(", ")) : ""}"></div>
-          <button class="btn" id="pp-save">${editing ? "Save changes" : "Add to passport"}</button>
-        </div>
-      </div>
 
-      <div class="pf-tabs">
-        <button class="cat-pill ${_ppFilter === "all" ? "on" : ""}" data-cat="all">🧰 All · ${items.length}</button>
-        ${Object.entries(PP_CATS).map(([k, v]) => `<button class="cat-pill ${_ppFilter === k ? "on" : ""}" data-cat="${k}">${v.icon} ${v.label} · ${byCat(k).length}</button>`).join("")}
-      </div>
+        <aside class="ln-rail">
+          <div class="card ln-card">
+            <div class="ln-card-head"><span class="ln-ico">🧬</span><h3>Profile summary</h3></div>
+            ${comp.novi_note ? `<p class="small">${esc(comp.novi_note)}</p>` : `<p class="small muted">The more proof you add, the clearer your story becomes for universities.</p>`}
+            ${comp.suggested_next ? `<div class="ln-next mt"><span class="ln-ico">🎯</span><span class="small"><b style="color:var(--accent-2)">${esc(comp.suggested_next)}</b></span></div>` : ""}
+            ${dnaFocus ? `<div class="ln-focus"><span class="small muted">Direction</span><div class="chip acc">${esc(dnaFocus)}</div></div>` : ""}
+          </div>
 
-      <div id="pf-grid" class="pf-grid">
-        ${filtered.length ? filtered.map(pfCard).join("") : `
-          <div class="card empty" style="grid-column:1/-1">
-            <h3>Nothing here yet</h3>
-            <p class="small muted mt">Add your first ${_ppFilter === "all" ? "achievement" : (PP_CATS[_ppFilter] ? PP_CATS[_ppFilter].label.toLowerCase() : "entry")} to grow your portfolio.</p>
-          </div>`}
+          <div class="card ln-card">
+            <div class="ln-card-head"><span class="ln-ico">✨</span><h3>Profile strengths</h3></div>
+            ${skillPool.length ? `<div class="tag-list" style="margin:0">${skillPool.map((s) => `<span class="chip acc">✦ ${esc(s)}</span>`).join("")}</div>` : `<p class="small muted">Skills you add to entries appear here — your profile’s “toolkit”.</p>`}
+          </div>
+
+          <div class="card ln-card">
+            <div class="ln-card-head"><span class="ln-ico">🗺️</span><h3>Proof coverage</h3></div>
+            ${Object.entries(PP_CATS).map(([k, v]) => `
+              <div class="ln-bar-row">
+                <span>${v.icon} ${v.label}</span>
+                <div class="ln-bar"><div class="ln-bar-fill ${byCat(k).length ? "has" : ""}" style="width:${Math.max(6, Math.min(100, (byCat(k).length / 3) * 100))}%"></div></div>
+                <b>${byCat(k).length}</b>
+              </div>`).join("")}
+          </div>
+        </aside>
       </div>`;
 
-    const resetForm = (re) => { _ppEditing = null; if (re) renderPassport(); else { renderPassport(); } };
+    function stat(label, n, tone) {
+      const colors = { normal: "var(--text)", good: "var(--good)", accent: "var(--accent-2)", warn: "var(--warn)" };
+      return `<div class="ln-stat"><b style="color:${colors[tone]}">${n}</b><span>${label}</span></div>`;
+    }
+
+    const resetForm = () => { _ppEditing = null; renderPassport(); };
     const save = async () => {
       const payload = {
         category: view.querySelector("#pp-cat").value,
@@ -1339,9 +1597,45 @@ async function renderPassport() {
     };
     view.querySelector("#pp-save").addEventListener("click", save);
     view.querySelector("#pp-title").addEventListener("keydown", (e) => { if (e.key === "Enter") save(); });
-    const ppCancel = view.querySelector("#pp-cancel"); if (ppCancel) ppCancel.addEventListener("click", () => { _ppEditing = null; renderPassport(); });
+    const ppCancel = view.querySelector("#pp-cancel"); if (ppCancel) ppCancel.addEventListener("click", resetForm);
     view.querySelectorAll(".pf-tabs .cat-pill").forEach((b) => b.addEventListener("click", () => { _ppFilter = b.dataset.cat; renderPassport(); }));
-    view.querySelector("#pf-grid").addEventListener("click", async (e) => {
+
+    const lnCamera = view.querySelector("#ln-camera"), lnFile = view.querySelector("#ln-file");
+    lnCamera.addEventListener("click", () => lnFile.click());
+    lnFile.addEventListener("change", async () => {
+      const file = lnFile.files && lnFile.files[0];
+      if (!file) return;
+      if (!file.type.startsWith("image/")) { toast("Please choose an image file", "err"); return; }
+      try {
+        const resized = await resizeImage(file, 240);
+        showLoader(true);
+        const me = await api("/auth/me", { method: "PATCH", body: JSON.stringify({ avatar: resized }) });
+        state.user = me; localStorage.setItem("novi_user", JSON.stringify(state.user));
+        toast("Profile photo updated ✨"); await renderPassport();
+      } catch (ex) { toast(ex.message); showLoader(false); }
+    });
+
+    view.querySelector("#ln-refresh").addEventListener("click", async () => {
+      const btn = view.querySelector("#ln-refresh");
+      btn.disabled = true; btn.innerHTML = "Scanning your chats…";
+      try {
+        const r = await api("/passport/refresh", { method: "POST" });
+        if (r.added > 0) toast(`Novi found ${r.added} new ${r.added === 1 ? "entry" : "entries"} from your chats ✨`);
+        else toast(r.total >= 3 ? "No new achievements found in your chats" : "Chat a little more first, then refresh again", "info");
+        await renderPassport();
+      } catch (ex) { toast(ex.message, "err"); }
+      finally { if (view.querySelector("#ln-refresh")) { view.querySelector("#ln-refresh").disabled = false; view.querySelector("#ln-refresh").innerHTML = "↻ Refresh from chat"; } }
+    });
+
+    view.querySelector("#ln-add").addEventListener("click", () => {
+      const form = view.querySelector("#pf-form");
+      form.scrollIntoView({ behavior: "smooth", block: "start" });
+      form.classList.toggle("ln-form-open");
+      const t = view.querySelector("#pp-title");
+      if (t && form.classList.contains("ln-form-open")) t.focus();
+    });
+
+    view.querySelector("#pf-feed").addEventListener("click", async (e) => {
       const del = e.target.closest("[data-pp-del]");
       if (del) {
         if (!confirm("Remove this entry from your passport?")) return;
@@ -1350,21 +1644,148 @@ async function renderPassport() {
         return;
       }
       const edit = e.target.closest("[data-pp-edit]");
-      if (edit) { _ppEditing = Number(edit.dataset.ppEdit); renderPassport(); if (view.querySelector("#pp-title")) { view.querySelector("#pp-title").focus(); view.scrollIntoView({ behavior: "smooth", block: "start" }); } }
+      if (edit) { _ppEditing = Number(edit.dataset.ppEdit); renderPassport(); if (view.querySelector("#pp-title")) { view.querySelector("#pp-title").focus(); } }
     });
   } catch (ex) { view.innerHTML = emptyState("Passport unavailable", ex.message); }
   finally { showLoader(false); }
+}
+
+function headlineFor(dctx, comp) {
+  const focus = (dctx && (dctx.label || dctx.top_zone)) || comp.dna_focus || "";
+  const base = focus ? `${focus}` : "Career";
+  return `${base} · proving my potential, one project at a time`;
+}
+
+async function resizeImage(file, maxSize) {
+  const raw = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(file); });
+  const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = raw; });
+  const scale = Math.min(1, maxSize / Math.max(img.width, img.height));
+  const w = Math.max(1, Math.round(img.width * scale)), h = Math.max(1, Math.round(img.height * scale));
+  const canvas = document.createElement("canvas"); canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(img, 0, 0, w, h);
+  return canvas.toDataURL("image/jpeg", 0.85);
+}
+
+/* ---------------------------------------------------------------- contribution graph (GitHub-style) */
+const GH_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+function _localISO(d) { const p = (n) => String(n).padStart(2, "0"); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`; }
+function _ghKindLabel(day) {
+  if (!day.level || day.level <= 0) return "No check-in";
+  const parts = [];
+  if (day.kind === "daily" || day.kind === "both") parts.push("Daily check-in");
+  if (day.kind === "weekly" || day.kind === "both") parts.push("Weekly reflection");
+  if (!parts.length) return `Logged in · ${day.count} pt`;
+  return `${parts.join(" + ")} · ${day.count} ${day.count === 1 ? "point" : "points"}`;
+}
+function contributionGraphHTML(g) {
+  const weeks = g.weeks || [];
+  const s = g.stats || {};
+  if (!weeks.length) return "";
+  const nWeeks = weeks.length;
+  const todayIso = _localISO(new Date());
+
+  let cells = "", idx = 0;
+  const monthMarkers = [], yearMarkers = [];
+  weeks.forEach((week, wi) => {
+    week.days.forEach((day) => {
+      const d = new Date(day.date + "T00:00:00");
+      const isToday = day.date === todayIso;
+      if (d.getDate() === 1) {
+        const key = day.date.slice(0, 7);
+        let span = 0;
+        for (let i = wi; i < nWeeks; i++) { if (weeks[i].days.some((x) => x.date.startsWith(key))) span++; else break; }
+        monthMarkers.push({ wi, label: GH_MONTHS[d.getMonth()], span, key });
+        if (d.getMonth() === 0) {
+          let yspan = 0;
+          for (let i = wi; i < nWeeks; i++) { if (weeks[i].days.some((x) => new Date(x.date + "T00:00:00").getFullYear() === d.getFullYear())) yspan++; else break; }
+          yearMarkers.push({ wi, label: String(d.getFullYear()), span: yspan });
+        }
+      }
+      const wShort = d.toLocaleDateString("en-US", { weekday: "short" });
+      const nice = d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+      const cellIdx = Math.min(idx, 40);
+      cells += `<div class="gh-cell l${day.level}${day.kind ? " k-" + day.kind : ""}${isToday ? " gh-today" : ""}" style="--i:${cellIdx}" title="${esc(day.note || day.date)}" data-date="${esc(day.date)}" data-day="${esc(nice)}" data-w="${wShort}" data-kind="${esc(_ghKindLabel(day))}"></div>`;
+      idx++;
+    });
+  });
+
+  const spacer = (arr, n) => { const out = []; for (let wi = 0; wi < n; wi++) { const m = arr.find((x) => x.wi === wi); out.push(m ? `<div class="gh-month${m.label.length > 4 ? " long" : ""}" style="grid-column:${wi + 1} / span ${m.span}">${m.label}</div>` : ""); } return out.join(""); };
+  const yearCells = [];
+  for (let wi = 0; wi < nWeeks; wi++) { const y = yearMarkers.find((x) => x.wi === wi); yearCells.push(y ? `<div class="gh-year" style="grid-column:${wi + 1} / span ${y.span}">${y.label}</div>` : ""); }
+
+  const dayLabels = [["0", "Mon"], ["2", "Wed"], ["4", "Fri"]];
+  const activeDays = weeks.reduce((a, w) => a + w.days.reduce((b, dd) => b + (dd.level > 0 ? 1 : 0), 0), 0);
+  return `
+    <div class="card gh-card">
+      <div class="gh-head">
+        <div>
+          <h2>🔥 Consistency streak</h2>
+          <p class="small muted mt">Every square is a day you checked in. <b class="muted" style="color:var(--text)">${activeDays}</b> active ${activeDays === 1 ? "day" : "days"} across the last ${nWeeks} weeks — daily check-ins plus weekly reflections.</p>
+        </div>
+        <div class="gh-stats">
+          <div class="gh-stat"><b>${esc(pluck(s, "current_streak"))}</b><span>day streak</span></div>
+          <div class="gh-stat"><b>${esc(pluck(s, "best_streak"))}</b><span>best streak</span></div>
+          <div class="gh-stat"><b>${esc(pluck(s, "active_days"))}</b><span>active days</span></div>
+          <div class="gh-stat"><b>${esc(pluck(s, "weekly_done"))}</b><span>weekly done</span></div>
+        </div>
+      </div>
+      <div class="gh-wrap" style="--gh-weeks:${nWeeks}">
+        <div class="gh-years">${yearCells.join("")}</div>
+        <div class="gh-months">${spacer(monthMarkers, nWeeks)}</div>
+        <div class="gh-body">
+          <div class="gh-days">${dayLabels.map(([r, lbl]) => `<span style="grid-row:${(+r) + 1}">${lbl}</span>`).join("")}</div>
+          <div class="gh-grid">${cells}</div>
+          <div class="gh-pop"></div>
+        </div>
+        <div class="gh-legend"><span class="small muted">Less</span>${[0, 1, 2, 3, 4].map((l) => `<div class="gh-cell l${l}"></div>`).join("")}<span class="small muted">More</span></div>
+      </div>
+      <div class="gh-hint small muted">Each day earns points for the fields you fill in (focus, done, mood, energy) — finishing your weekly reflection colors the whole week. Hover any square to see the date.</div>
+    </div>`;
+}
+function pluck(o, k) { return o && o[k] !== undefined && o[k] !== null ? o[k] : 0; }
+
+function attachGraphTooltips(root) {
+  const body = root.querySelector(".gh-body");
+  const pop = body ? body.querySelector(".gh-pop") : null;
+  if (!body || !pop) return;
+  body.addEventListener("mouseover", (e) => {
+    const cell = e.target.closest(".gh-cell");
+    if (!cell || !cell.dataset.day) return;
+    pop.innerHTML = `<b>${esc(cell.dataset.w)} · ${esc(cell.dataset.day)}</b><span>${esc(cell.dataset.kind)}</span>`;
+    pop.style.opacity = "1";
+  });
+  body.addEventListener("mousemove", (e) => {
+    if (pop.style.opacity !== "1") return;
+    const r = body.getBoundingClientRect();
+    const pr = pop.getBoundingClientRect();
+    let x = (e.clientX - r.left) - pr.width / 2;
+    x = Math.max(6, Math.min(r.width - pr.width - 6, x));
+    let y = (e.clientY - r.top) - pr.height - 12;
+    if (y < 4) y = (e.clientY - r.top) + 16;
+    pop.style.left = x + "px";
+    pop.style.top = y + "px";
+  });
+  body.addEventListener("mouseout", (e) => {
+    if (e.relatedTarget && e.relatedTarget.closest && e.relatedTarget.closest(".gh-body")) return;
+    pop.style.opacity = "0";
+  });
 }
 
 /* ---------------------------------------------------------------- check-in */
 async function renderCheckin() {
   showLoader(true); view.innerHTML = "";
   try {
-    const [dctx, cur, history] = await Promise.all([getDnaContext(), api("/checkins/current"), api("/checkins").catch(() => [])]);
+    const [cur, history, contrib] = await Promise.all([
+      api("/checkins/current"),
+      api("/checkins").catch(() => []),
+      api("/checkins/graph").catch(() => null),
+    ]);
     const ai = cur.ai_summary && typeof cur.ai_summary === "object" ? cur.ai_summary : null;
     view.innerHTML = `
       <div class="hero">${kicker("Your weekly pulse")}<h1>Weekly Check-in</h1><p>Your weekly pulse with Novi — honest answers make your mentoring sharper.</p></div>
-      ${dnaBarHTML(dctx, "checkin")}
+      
+      ${contrib ? contributionGraphHTML(contrib) : ""}
       <div class="card mb">
         <div class="between"><h2>This week · ${esc(cur.week_start || "")}</h2>${cur.status ? pill(esc(cur.status), "mid") : ""}</div>
         ${ai ? `
@@ -1401,6 +1822,7 @@ async function renderCheckin() {
             </div>`).join("") : `<p class="small muted">No previous check-ins.</p>`}
         </div>
       </div>`;
+    attachGraphTooltips(view);
     const collect = () => {
       const p = {};
       view.querySelectorAll("[data-ck]").forEach((el) => { const v = el.value; if (v) p[el.dataset.ck] = el.dataset.ck === "mood" ? v : el.dataset.ck === "energy" ? Number(v) : String(v); });

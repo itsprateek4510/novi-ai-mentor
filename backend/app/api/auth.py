@@ -5,7 +5,7 @@ from app.core import security
 from app.core.database import get_db
 from app.core.deps import get_current_user
 from app.models.user import User
-from app.schemas.auth import LoginRequest, SignupRequest, TokenResponse, UserUpdate
+from app.schemas.auth import LoginRequest, PasswordChange, SignupRequest, TokenResponse, UserUpdate
 from app.schemas.common import RoleBase
 from app.services import auth as auth_service
 
@@ -37,3 +37,13 @@ async def me(user: User = Depends(get_current_user)):
 @router.patch("/me", response_model=RoleBase)
 async def update_me(data: UserUpdate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     return auth_service.update_profile(user, data, db)
+
+
+@router.post("/change-password")
+async def change_password(
+    data: PasswordChange,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    auth_service.change_password(user, data.current_password, data.new_password, db)
+    return {"status": "ok", "detail": "Password updated"}

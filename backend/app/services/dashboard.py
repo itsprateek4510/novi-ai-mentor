@@ -76,9 +76,11 @@ def _progress(db: Session, user: User, passport_completion: dict) -> dict:
     career_matches = list_career_matches(db, user)
     top_score = career_matches[0].score if career_matches else 0
 
-    if top_score >= 75:
+    if not career_matches:
+        direction = "Exploring" if (dna and dna.dna_filled) else "Needs Focus"
+    elif top_score >= 60:
         direction = "On Track"
-    elif top_score >= 55:
+    elif top_score >= 40:
         direction = "Exploring"
     else:
         direction = "Needs Focus"
@@ -86,10 +88,15 @@ def _progress(db: Session, user: User, passport_completion: dict) -> dict:
     dna_pct = 100 if (dna and dna.dna_filled) else 0
     if dna and not dna.dna_filled:
         dna_pct = min(100, sum(1 for f in (dna.traits, dna.interests, dna.strengths, dna.career_zones) if f) * 15)
-    goal_momentum = min(100, len(list(roadmap_svc.list_goals(db, user))) * 20)
+    goals = list(roadmap_svc.list_goals(db, user))
+    goal_momentum = min(100, sum(1 for g in goals if g.status.value == "active") * 20)
 
     profile_strength = round(
-        0.6 * passport_completion["score"] + 0.25 * dna_pct + 0.15 * goal_momentum
+        0.35 * dna_pct
+        + 0.25 * top_score
+        + 0.20 * goal_momentum
+        + 0.10 * roadmap_svc.progress_percent(db, user)
+        + 0.10 * passport_completion["score"]
     )
     return {
         "career_direction": direction,
@@ -102,18 +109,27 @@ def _progress(db: Session, user: User, passport_completion: dict) -> dict:
 def _today_focus(db: Session, user: User, next_task: dict | None, priorities: list[dict], roadmap_items: list[dict]) -> dict | None:
     if next_task:
         return {
+            "kind": "task",
+            "id": next_task["id"],
             "title": next_task["title"],
             "why": f"This strengthens your {next_task.get('category', 'current')} profile and moves you closer to your goal.",
+        }
+    grade_items = [r for r in roadmap_items if not r["completed"] and r["grade"] >= (user.grade or 9)]
+    if grade_items:
+        return {
+            "kind": "roadmap",
+            "id": grade_items[0]["id"],
+            "title": grade_items[0]["title"],
+            "why": "This is your next step on your learning roadmap.",
         }
     active = [p for p in priorities if not p["completed"]]
     if active:
         return {
+            "kind": "priority",
+            "id": active[0]["id"],
             "title": active[0]["title"],
             "why": f"This is your top {active[0]['skill_category']} priority for this week.",
         }
-    grade_items = [r for r in roadmap_items if not r["completed"] and r["grade"] >= (user.grade or 9)]
-    if grade_items:
-        return {"title": grade_items[0]["title"], "why": "This is your next step on your learning roadmap."}
     return None
 
 

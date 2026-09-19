@@ -46,10 +46,10 @@ async def magic_dna(
 
 @router.post("/refresh", response_model=CareerDNAOut)
 async def refresh_dna(user: User = Depends(get_current_student), db: Session = Depends(get_db)):
-    chat_history = _recent_history(user, db)
+    conv_id, chat_history = _recent_history(user, db)
     if not chat_history:
         raise HTTPException(status_code=400, detail="Chat with Novi first so your DNA has something to learn from")
-    dna = await dna_service.refresh_dna_from_history(user, chat_history, db)
+    dna = await dna_service.refresh_dna_from_history(user, chat_history, db, conversation_id=conv_id)
     return _payload(dna)
 
 
@@ -85,15 +85,22 @@ def _payload(dna) -> dict:
         "novi_reflection": dna.novi_reflection or "",
         "dna_filled": dna.dna_filled,
         "updated_at": dna.updated_at.isoformat() if dna.updated_at else None,
+        "sources": dna.sources or {},
+        "excluded": dna.excluded or [],
     }
 
 
-def _recent_history(user: User, db: Session) -> list[dict]:
+def _recent_history(user: User, db: Session) -> tuple[int | None, list[dict]]:
     from app.services.chat import list_conversations, get_chat_history
 
     convos = list_conversations(user, db)
     if not convos:
-        return []
+        return None, []
+    # Pull evidence from the student's recent conversations, newest first,
+    # so DNA reflects what Novi has actually heard across chats.
     newest = convos[0]
-    history = get_chat_history(user, newest.id, db)
-    return history[-20:]
+    history: list[dict] = []
+    for conv in convos[:6]:
+        for m in get_chat_history(user, conv.id, db)[-12:]:
+            history.append({**m, "conversation_id": conv.id})
+    return newest.id, history[-40:]

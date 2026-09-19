@@ -5,6 +5,7 @@ import time
 from typing import Any
 
 from google import genai
+from google.genai import types
 
 from app.core.config import settings
 from app.llm.base import LLMError, LLMProvider
@@ -60,6 +61,49 @@ class GeminiProvider(LLMProvider):
             if parsed is not None:
                 return parsed
         raise LLMError("Failed to parse JSON from Gemini")
+
+    async def complete_grounded(self, prompt: str, system: str | None = None) -> dict:
+        """Gemini with built-in Google Search grounding. Returns:
+        {"text": str, "sources": [{"title": str, "uri": str, "domain": str}]}."""
+        if not self._api_key:
+            raise LLMError("GEMINI_API_KEY is not configured")
+
+        for attempt in range(2):
+            try:
+                await self._throttle()
+                contents = [system or "", prompt] if system else [prompt]
+                response = self.client.models.generate_content(
+                    model=self.model,
+                    contents="\n\n".join(c for c in contents if c),
+                    config=types.GenerateContentConfig(
+                        tools=[types.Tool(google_search=types.GoogleSearch())]
+                    ),
+                )
+                self.last_call_time = time.time()
+                text = (response.text or "").strip()
+                if not text:
+                    raise LLMError("Empty Gemini response")
+                sources: list[dict] = []
+                for candidate in response.candidates or []:
+                    meta = getattr(candidate, "grounding_metadata", None)
+                    if not meta:
+                        continue
+                    for chunk in meta.grounding_chunks or []:
+                        web = getattr(chunk, "web", None)
+                        if web and web.uri:
+                            sources.append({"title": web.title or "", "uri": web.uri, "domain": web.domain or ""})
+                return {"text": text, "sources": sources}
+            except Exception as exc:  # pylint: disable=broad-except
+                if attempt == 0 and ("429" in str(exc) or "RESOURCE_EXHAUSTED" in str(exc)):
+                    await asyncio.sleep(6)
+                    continue
+                print(f"[gemini] grounded error: {exc}")
+                if "429" in str(exc) or "RESOURCE_EXHAUSTED" in str(exc):
+                    raise LLMError(
+                        "I've hit my daily conversation limit. Please try again tomorrow! 🌅"
+                    ) from exc
+                raise LLMError("Gemini unavailable") from exc
+        raise LLMError("Gemini unavailable")
 
     @staticmethod
     def _extract_json(text: str) -> Any:

@@ -24,7 +24,11 @@ def search_universities(db: Session, filters: UniversityFilters) -> list[Univers
     if filters.country:
         stmt = stmt.where(University.country == filters.country)
     if filters.subject:
-        stmt = stmt.where(University.subject == filters.subject)
+        subject = filters.subject.strip().lower()
+        stmt = stmt.where(
+            (University.subject == subject)
+            | University.courses.contains([subject])
+        )
     if filters.university_type:
         stmt = stmt.where(University.university_type == filters.university_type)
     if filters.min_rank:
@@ -33,8 +37,29 @@ def search_universities(db: Session, filters: UniversityFilters) -> list[Univers
         stmt = stmt.where(University.fees_per_year <= filters.max_fees)
     if filters.scholarships is not None:
         stmt = stmt.where(University.scholarships == filters.scholarships)
-    stmt = stmt.order_by(University.ranking.asc()).limit(filters.limit)
-    return list(db.scalars(stmt))
+    # Authoritative ordering: without a subject filter, a bare "best rank" is
+    # meaningless (a school can be #1 in one subject and far down in another),
+    # so default to an alphabetical listing. With a subject filter, order by
+    # that subject's rank. Ranked universities always sort above unranked ones
+    # (MySQL sorts NULLs first on ASC, which would show unranked schools on top).
+    if filters.subject:
+        stmt = stmt.order_by(
+            University.ranking.is_(None),
+            University.ranking.asc(),
+            University.name.asc(),
+        ).limit(min(filters.limit, 200))
+        results = list(db.scalars(stmt))
+        def sort_key(u: University):
+            ranks = u.rankings or {}
+            if filters.subject in ranks:
+                return (0, ranks[filters.subject], u.name.lower())
+            if u.ranking is not None:
+                return (1, u.ranking, u.name.lower())
+            return (2, 10**6, u.name.lower())
+        results.sort(key=sort_key)
+        return results[: filters.limit]
+    stmt = stmt.order_by(University.name.asc()).limit(min(filters.limit, 200))
+    return list(db.scalars(stmt))[: filters.limit]
 
 
 def get_university(db: Session, university_id: int | None = None, slug: str | None = None) -> University | None:
@@ -50,9 +75,33 @@ def list_countries(db: Session) -> list[str]:
     return [r for r in rows if r]
 
 
+SUBJECT_ORDER = [
+    "computer-science", "data-science", "engineering", "architecture", "medicine",
+    "law", "business", "economics", "science", "arts",
+]
+SUBJECT_LABELS = {
+    "computer-science": "Computer Science",
+    "data-science": "Data Science & AI",
+    "engineering": "Engineering",
+    "architecture": "Architecture",
+    "medicine": "Medicine & Health",
+    "law": "Law",
+    "business": "Business & Management",
+    "economics": "Economics & Policy",
+    "science": "Sciences",
+    "arts": "Arts & Humanities",
+}
+
+
 def list_subjects(db: Session) -> list[str]:
-    rows = db.scalars(select(University.subject).distinct().order_by(University.subject))
-    return [r for r in rows if r]
+    seen = set()
+    for u in db.scalars(select(University.rankings)):
+        if u:
+            seen.update(k for k in u if k in SUBJECT_ORDER)
+    if not seen:
+        rows = db.scalars(select(University.subject).distinct())
+        seen = {r for r in rows if r in SUBJECT_ORDER}
+    return [s for s in SUBJECT_ORDER if s in seen]
 
 
 async def readiness(db: Session, user: User, request: ReadinessRequest) -> UniversityMatch:
@@ -252,3 +301,101 @@ def _heuristic_readiness(user: User, university: University, dna) -> dict:
             "Join an activity that shows leadership or initiative",
         ],
     }
+
+
+async def advice(
+    db: Session,
+    user: User,
+    question: str,
+    subject: str | None = None,
+    university_ids: list[int] | None = None,
+) -> dict:
+    """Return a personalized, web-grounded "which university is best" answer."""
+    dna = get_dna(user, db)
+    student = {"name": user.display_name, "grade": user.grade, "school": user.school}
+
+    if university_ids:
+        stmt = select(University).where(University.id.in_(university_ids)).limit(10)
+        candidates = list(db.scalars(stmt))
+    elif subject:
+        filters = UniversityFilters(subject=subject, limit=5)
+        candidates = search_universities(db, filters)
+    else:
+        candidates = recommend(db, user, limit=5)
+        candidates = [m["university"] for m in candidates]
+        if not candidates:
+            filters = UniversityFilters(limit=5)
+            candidates = search_universities(db, filters)
+
+    profile = [c for c in candidates if c][:5]
+    payload = [
+        {
+            "id": u.id,
+            "name": u.name,
+            "country": u.country,
+            "city": u.city,
+            "course": u.course,
+            "subject": u.subject,
+            "ranking": u.ranking,
+            "fees_per_year": u.fees_per_year,
+            "university_type": u.university_type,
+            "about": (u.about or "")[:400],
+        }
+        for u in profile
+    ]
+
+    fallback = _advice_fallback(question, profile, dna)
+
+    try:
+        result = await gemini.complete_grounded(
+            prompts.university_advice_prompt(question, payload, dna_dict(dna), student),
+            system=prompts.UNIVERSITY_ADVICE_SYSTEM,
+        )
+        answer = (result.get("text") or "").strip()
+        if not answer:
+            raise ValueError("empty answer")
+        sources = result.get("sources") or []
+    except Exception as exc:
+        print(f"[universities] advice LLM failed, using heuristic: {exc}")
+        answer, sources = fallback, []
+
+    memory.archive(
+        user,
+        f"User asked Novi for university advice: \"{question}\" → {profile[0].name if profile else 'none'}.",
+        ("university", "advice"),
+    )
+    return {"answer": answer, "sources": sources, "candidates": profile}
+
+
+def _advice_fallback(question: str, candidates: list, dna) -> str:
+    target = None
+    if dna and (dna.interests or dna.subjects or dna.career_zones):
+        blob = " ".join(
+            (dna.interests or []) + (dna.subjects or []) + (dna.career_zones or [])
+        ).lower()
+        for u in candidates:
+            hay = " ".join([u.course or "", u.subject or ""]).lower()
+            if any(b in hay for b in blob.split() if len(b) > 3):
+                target = u
+                break
+
+    ranked = [u for u in candidates if u.ranking is not None]
+    best = target or (min(ranked, key=lambda u: u.ranking) if ranked else (candidates[0] if candidates else None))
+    if not best:
+        return (
+            "I don't have enough data yet to recommend a specific university. "
+            "Could you tell me about your subjects and career interests first? 🎓"
+        )
+    place = f"{best.city}, {best.country}" if best.city else best.country
+    rank_clause = ""
+    if best.ranking is not None:
+        rank_clause = f" ranked #{best.ranking} in its subject"
+    fee_clause = ""
+    if best.fees_per_year:
+        fee_clause = f" with yearly fees around ${best.fees_per_year:,}"
+    return (
+        f"Based on your profile, I'd look most closely at {best.name} in {place}{rank_clause}"
+        f"{fee_clause}.\n\nIt lines up with the fields you care about ({(best.subject or 'your interests').replace('-', ' ')}), "
+        f"and it's a realistic target to aim for. Want me to check your readiness for it, "
+        f"or compare two schools side by side? 🎓"
+    )

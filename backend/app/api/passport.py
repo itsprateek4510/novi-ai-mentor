@@ -73,3 +73,10 @@ async def delete_item(
 @router.get("/completion", response_model=PassportCompletionOut)
 async def completion(user: User = Depends(get_current_student), db: Session = Depends(get_db)):
     return passport_service.completion(db, user)
+
+
+@router.post("/refresh")
+async def refresh_from_chat(user: User = Depends(get_current_student), db: Session = Depends(get_db)):
+    result = await passport_service.refresh_from_chat(db, user)
+    _sync(user, db)
+    return result

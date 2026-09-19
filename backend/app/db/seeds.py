@@ -8,9 +8,14 @@ from sqlalchemy.orm import Session
 
 from app.models.career import Career
 from app.models.university import University
+from app.db.career_catalog import CAREERS as CAREERS_TUPLES
+from app.db.career_catalog import RANKING_PROFILES, build_career, normalize_category, slugify
 
 
-CAREERS: list[dict] = [
+def _detailed_careers() -> list[dict]:
+    """Hand-written flagship entries (richer than the catalog defaults).
+    These take priority over catalog-generated rows with the same slug."""
+    return [
     {
         "slug": "product-manager",
         "title": "Product Manager",
@@ -347,6 +352,56 @@ CAREERS: list[dict] = [
         "salary_range": "$50k - $110k (India: ₹6-20L)",
         "outlook": "Stable — and expanding rapidly through EdTech.",
     },
+]
+
+# Full catalog = hand-written flagship careers merged with the generated master
+# list. Hand-written entries win on slug collisions; any missing ranking fields
+# are back-filled from an appropriate profile.
+_FLAGSHIP_PROFILE = {
+    "product-manager": "TECH",
+    "ai-engineer": "AI_DATA",
+    "software-engineer": "TECH",
+    "cybersecurity-analyst": "CYBER",
+    "data-scientist": "AI_DATA",
+    "game-developer": "MEDIA",
+    "ux-designer": "CREATIVE",
+    "product-designer": "CREATIVE",
+    "architect": "CREATIVE",
+    "entrepreneur": "ENTREPRENEUR",
+    "business-analyst": "BUSINESS",
+    "digital-marketer": "BUSINESS",
+    "doctor": "HEALTH",
+    "psychologist": "HEALTH",
+    "financial-analyst": "FINANCE",
+    "civil-engineer": "ENGINEERING",
+    "robotics-engineer": "ENGINEERING",
+    "research-scientist": "SCIENCE",
+    "lawyer": "LAW",
+    "journalist": "MEDIA",
+    "teacher": "EDU",
+}
+
+
+def _merge_catalog() -> list[dict]:
+    merged = {c["slug"]: c for c in _detailed_careers()}
+    for slug, profile in _FLAGSHIP_PROFILE.items():
+        if slug in merged:
+            merged[slug]["ranking_profile"] = profile
+            merged[slug]["country_rankings"] = RANKING_PROFILES[profile]
+    # Every hand-written entry that still lacks ranking data gets a safe default.
+    for c in merged.values():
+        c["category"] = normalize_category(c.get("category"))
+        c.setdefault("ranking_profile", "DEFAULT")
+        c.setdefault("country_rankings", RANKING_PROFILES["DEFAULT"])
+        if "ranking_profile" in c:
+            c.setdefault("country_rankings", RANKING_PROFILES.get(c["ranking_profile"], RANKING_PROFILES["DEFAULT"]))
+    return merged
+
+
+CAREERS: list[dict] = list(_merge_catalog().values()) + [
+    build_career(title, category, profile)
+    for (title, category, profile) in CAREERS_TUPLES
+    if slugify(title) not in _merge_catalog()
 ]
 
 UNIVERSITIES: list[dict] = [

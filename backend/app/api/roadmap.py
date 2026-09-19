@@ -163,5 +163,6 @@ def _roadmap_payload(roadmap: dict) -> dict:
                  "description": roadmap["goal"].description, "category": roadmap["goal"].category.value,
                  "status": roadmap["goal"].status.value} if roadmap["goal"] else None,
         "stages": roadmap["stages"],
+        "short_term": roadmap.get("short_term", []),
         "progress_percent": roadmap["progress_percent"],
     }

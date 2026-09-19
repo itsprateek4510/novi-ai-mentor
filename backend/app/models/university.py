@@ -25,6 +25,8 @@ class University(Base):
     website: Mapped[str | None] = mapped_column(String(500), nullable=True)
     tags: Mapped[list | None] = mapped_column(JSON, nullable=True)
     strengths: Mapped[list | None] = mapped_column(JSON, nullable=True)        # e.g. ["#1 in AI research"]
+    courses: Mapped[list | None] = mapped_column(JSON, nullable=True)          # clean subject labels this uni is ranked in
+    rankings: Mapped[dict | None] = mapped_column(JSON, nullable=True)         # {subject_slug: best_rank}
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     matches = relationship("UniversityMatch", back_populates="university", cascade="all, delete-orphan")

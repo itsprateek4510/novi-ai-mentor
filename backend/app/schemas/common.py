@@ -17,6 +17,7 @@ class RoleBase(ORMModel):
     last_name: str = ""
     grade: int | None = None
     school: str | None = None
+    avatar: str | None = None
     letta_agent_id: str | None = None
     created_at: datetime | None = None
 

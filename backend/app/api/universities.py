@@ -5,6 +5,8 @@ from app.core.database import get_db
 from app.core.deps import get_current_student
 from app.models.user import User
 from app.schemas.university import (
+    AdviceOut,
+    AdviceRequest,
     ReadinessRequest,
     UniversityFilters,
     UniversityMatchOut,
@@ -42,7 +44,12 @@ async def universities(
 
 @router.get("/filters")
 async def filters(db: Session = Depends(get_db)):
-    return {"countries": uni_service.list_countries(db), "subjects": uni_service.list_subjects(db)}
+    subjects = uni_service.list_subjects(db)
+    return {
+        "countries": uni_service.list_countries(db),
+        "subjects": subjects,
+        "subject_labels": {s: uni_service.SUBJECT_LABELS.get(s, s) for s in subjects},
+    }
 
 
 @router.get("/recommended", response_model=list[UniversityMatchOut])
@@ -61,6 +68,17 @@ async def readiness(
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return result
+
+
+@router.post("/advice", response_model=AdviceOut)
+async def advice(
+    request: AdviceRequest,
+    user: User = Depends(get_current_student),
+    db: Session = Depends(get_db),
+):
+    return await uni_service.advice(
+        db, user, request.question, subject=request.subject, university_ids=request.university_ids
+    )
 
 
 @router.get("/{slug}", response_model=UniversityOut)

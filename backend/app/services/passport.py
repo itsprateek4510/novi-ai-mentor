@@ -3,12 +3,14 @@ from datetime import datetime
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.models.enums import PassportCategory
+from app.llm import prompts
+from app.models.chat import Conversation, Message
+from app.models.enums import MessageRole, PassportCategory
 from app.models.passport import PassportItem
 from app.models.user import User
 from app.schemas.passport import PassportItemCreate, PassportItemUpdate
 from app.services.career_dna import get_dna
-from app.services.providers import memory
+from app.services.providers import gemini, memory
 
 CORE_CATEGORIES = (
     "projects", "competitions", "certifications", "leadership", "research", "activities",
@@ -130,6 +132,79 @@ def delete_item(db: Session, user: User, item_id: int) -> bool:
     return True
 
 
+def _chat_history(db: Session, user: User) -> list[dict]:
+    """All user/assistant messages across the student's conversations, oldest first."""
+    stmt = (
+        select(Message)
+        .join(Conversation)
+        .where(Conversation.user_id == user.id)
+        .order_by(Message.created_at.asc())
+    )
+    return [
+        {"role": m.role.value, "content": m.content}
+        for m in db.scalars(stmt)
+        if m.role != MessageRole.SYSTEM
+    ]
+
+
+async def refresh_from_chat(db: Session, user: User) -> dict:
+    """Scan the student's chat history and auto-add new passport entries.
+
+    Returns {"added": int, "skipped": int, "total": int} so the UI can report
+    what Novi found. Skips entries that already exist (title-based dedupe).
+    """
+    history = _chat_history(db, user)
+    user_msgs = [m for m in history if m["role"] == MessageRole.USER.value]
+    if len(user_msgs) < 3:
+        return {"added": 0, "skipped": 0, "total": len(user_msgs)}
+
+    existing = [i.title for i in list_items(db, user)]
+    try:
+        result = await gemini.complete_json(
+            prompts.passport_extract_prompt(history, existing),
+            system=prompts.PASSPORT_EXTRACT_SYSTEM,
+        )
+    except Exception as exc:
+        print(f"[passport] chat extraction skipped: {exc}")
+        return {"added": 0, "skipped": 0, "total": len(user_msgs)}
+
+    if not isinstance(result, dict):
+        return {"added": 0, "skipped": 0, "total": len(user_msgs)}
+
+    added = 0
+    existing_titles = set(t.strip().lower() for t in existing)
+    for raw in result.get("items") or []:
+        if not isinstance(raw, dict):
+            continue
+        category = str(raw.get("category", "")).strip()
+        if category not in CORE_CATEGORIES + ("achievements",):
+            continue
+        title = str(raw.get("title", "")).strip()
+        if not title or title.lower() in existing_titles:
+            continue
+        date_str = str(raw.get("date_achieved") or "").strip()
+        date_achieved = None
+        if date_str[:7].count("-") == 1:
+            try:
+                date_achieved = datetime.strptime(date_str[:7], "%Y-%m").date()
+            except ValueError:
+                date_achieved = None
+        data = PassportItemCreate(
+            category=category,
+            title=title,
+            description=str(raw.get("description") or "").strip(),
+            skills=[str(s).strip() for s in (raw.get("skills") or []) if str(s).strip()],
+            date_achieved=date_achieved,
+        )
+        created = create_item(db, user, data)
+        if created and created.title.strip().lower() not in existing_titles:
+            added += 1
+            existing_titles.add(created.title.strip().lower())
+    if added:
+        dedupe_items(db, user)
+    return {"added": added, "skipped": 0, "total": len(user_msgs)}
+
+
 def completion(db: Session, user: User) -> dict:
     items = list_items(db, user)
     counts = {category: sum(1 for i in items if i.category == category) for category in CORE_CATEGORIES}
@@ -155,6 +230,7 @@ def completion(db: Session, user: User) -> dict:
     dna_focus = focus or "your strongest career direction"
 
     if by_category[weakest] == 0:
+        suggested_next = f"Add your first {weakest.replace('_', ' ')} item — {CATEGORY_DESCRIPTIONS[weakest]}"
         if focus:
             category_copy = {
                 "projects": f"Add your first project — a {focus.lower()} build would prove your DNA in action.",
@@ -164,9 +240,7 @@ def completion(db: Session, user: User) -> dict:
                 "research": f"Add your first research item — a small study or analysis in {focus.lower()} counts.",
                 "activities": f"Add your first activity — a club or event that connects you to {focus.lower()}.",
             }
-            suggested_next = category_copy.get(weakest)
-        if not suggested_next:
-            suggested_next = f"Add your first {weakest.replace('_', ' ')} item — {CATEGORY_DESCRIPTIONS[weakest]}"
+            suggested_next = category_copy.get(weakest, suggested_next)
     else:
         suggested_next = f"Deepen your {weakest.replace('_', ' ')} portfolio with one more strong example."
 

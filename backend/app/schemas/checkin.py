@@ -32,3 +32,28 @@ class CheckinSummaryOut(BaseModel):
     new_skills: list[str] = []
     milestones: list[str] = []
     priorities_next_week: list[str] = []
+
+
+class ContributionCell(BaseModel):
+    date: date
+    level: int          # 0-4, GitHub-style intensity
+    count: int          # activity points behind the level
+    kind: str = ""      # "daily" | "weekly" | "both" | ""
+    note: str = ""      # tooltip text
+
+
+class ContributionWeek(BaseModel):
+    week_start: date
+    days: list[ContributionCell]
+
+
+class ContributionStats(BaseModel):
+    current_streak: int = 0
+    best_streak: int = 0
+    active_days: int = 0
+    weekly_done: int = 0
+
+
+class ContributionGraphOut(BaseModel):
+    weeks: list[ContributionWeek]
+    stats: ContributionStats

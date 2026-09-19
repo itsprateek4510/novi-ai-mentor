@@ -8,6 +8,8 @@ from app.schemas.roadmap import GoalOut, PriorityOut, RoadmapItemOut, TaskOut
 
 
 class FocusChip(BaseModel):
+    kind: str = "priority"                  # "task" | "roadmap" | "priority"
+    id: int | None = None
     title: str
     why: str
 

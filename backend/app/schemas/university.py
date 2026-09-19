@@ -22,6 +22,8 @@ class UniversityOut(ORMModel):
     website: str | None = None
     tags: list | None = None
     strengths: list | None = None
+    courses: list | None = None
+    rankings: dict | None = None
 
 
 class UniversityMatchOut(ORMModel):
@@ -37,6 +39,24 @@ class UniversityMatchOut(ORMModel):
 class ReadinessRequest(BaseModel):
     university_id: int
     course: str | None = None
+
+
+class AdviceSource(BaseModel):
+    title: str = ""
+    uri: str = ""
+    domain: str = ""
+
+
+class AdviceOut(BaseModel):
+    answer: str
+    sources: list[AdviceSource] = []
+    candidates: list[UniversityOut] = []
+
+
+class AdviceRequest(BaseModel):
+    question: str = "Which university is best for me?"
+    subject: str | None = None
+    university_ids: list[int] | None = None
 
 
 class UniversityFilters(BaseModel):

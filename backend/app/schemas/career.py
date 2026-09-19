@@ -14,6 +14,8 @@ class CareerOut(ORMModel):
     summary: str
     salary_range: str | None = None
     outlook: str | None = None
+    ranking_profile: str | None = None
+    country_rankings: list | None = None
 
 
 class CareerDetailOut(ORMModel):
@@ -32,6 +34,8 @@ class CareerDetailOut(ORMModel):
     future_paths: list | None = None
     salary_range: str | None = None
     outlook: str | None = None
+    ranking_profile: str | None = None
+    country_rankings: list | None = None
     fit_rating: float | None = None     # 0-100, present when the user has a stored match
     reasons: list | None = None
 

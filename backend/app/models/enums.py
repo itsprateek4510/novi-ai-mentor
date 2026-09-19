@@ -56,6 +56,9 @@ class CheckinStatus(str, enum.Enum):
     SUMMARIZED = "summarized"
 
 
+DailyCheckinStatus = CheckinStatus
+
+
 class MessageRole(str, enum.Enum):
     USER = "user"
     ASSISTANT = "assistant"

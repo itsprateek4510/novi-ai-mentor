@@ -24,6 +24,8 @@ class Career(Base):
     future_paths: Mapped[list | None] = mapped_column(JSON, nullable=True)
     salary_range: Mapped[str | None] = mapped_column(String(100), nullable=True)
     outlook: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    ranking_profile: Mapped[str] = mapped_column(String(50), default="DEFAULT", index=True)
+    country_rankings: Mapped[list | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     matches = relationship("CareerMatch", back_populates="career", cascade="all, delete-orphan")

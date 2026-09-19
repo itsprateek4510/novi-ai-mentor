@@ -1,4 +1,5 @@
 import re
+from difflib import SequenceMatcher
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -10,9 +11,14 @@ from app.schemas.career_dna import CareerDNAUpdate, ReflectionUpdate
 from app.services.providers import dna_dict, gemini, memory
 
 _NEGATION_RE = re.compile(
-    r"\b(?:don'?t like|do not like|not a fan of|not interested in|lost interest in|"
+    r"\b(?:don'?t\s*(?:not\s+)?like|do\s+not\s+like|not a fan of|not interested in|lost interest in|"
     r"bored of|getting bored of|no longer (?:into|care about)|isn'?t for me|is not for me|"
     r"not into|don'?t care about|don'?t enjoy|hate|can'?t stand|cannot stand|dislike)\b",
+    re.I,
+)
+# "AI is not for me" / "AI isn't for me" — subject comes BEFORE the signal.
+_BEFORE_NEGATION_RE = re.compile(
+    r"\b([a-z][a-z0-9 &+.+-]{1,24}?)\s+(?:is|was|seems|feels)\s+(?:not\s+)?(?:for\s+me|my\s+thing|my\s+jam|my\s+vibe)\b",
     re.I,
 )
 _PREFER_OVER_RE = re.compile(
@@ -22,7 +28,15 @@ _STOPWORDS = {
     "the", "and", "part", "parts", "when", "that", "with", "this", "too",
     "much", "now", "more", "anymore", "it", "is", "of", "to", "for",
     "on", "in", "my", "me", "i", "a", "an", "stuff", "thing", "things",
+    "anymore", "at", "all", "really", "just", "want", "wanna", "going",
+    "gonna", "about", "focus", "focusing", "focussing", "only", "so",
+    "what", "that", "then", "also", "very", "bit", "little",
 }
+_FILLER_TAIL_RE = re.compile(
+    r"(?:\s+(?:at all|anymore|no more|now|these days|right now|from now on|as much|"
+    r"that much|really|at all anymore|now a days|nowadays))\s*$",
+    re.I,
+)
 
 PREFERENCE_FIELDS = ("interests", "subjects", "skills", "career_zones", "goals", "motivations", "values")
 
@@ -64,7 +78,23 @@ def update_dna(user: User, data: CareerDNAUpdate, db: Session) -> CareerDNA:
     db.commit()
     db.refresh(dna)
     _mirror_dna_to_memory(user, dna)
+    _rescore_on_dna_change(user, db)
     return dna
+
+
+def _rescore_on_dna_change(user: User, db: Session) -> None:
+    """Keep the stored top career match consistent with the current DNA.
+
+    Runs after any DNA write (chat auto-refresh, manual edit, magic build) so
+    the Careers page top pick always matches what the student believes now —
+    e.g. "I don't like AI" removes AI as the #1 recommendation immediately.
+    """
+    from app.services.careers import rescore_matches
+
+    try:
+        rescore_matches(db, user, limit=1)
+    except Exception as exc:
+        print(f"[dna] match rescore skipped: {exc}")
 
 
 def _mirror_dna_to_memory(user: User, dna: CareerDNA) -> None:
@@ -88,7 +118,8 @@ def _mirror_dna_to_memory(user: User, dna: CareerDNA) -> None:
 
 
 async def refresh_dna_from_history(
-    user: User, chat_history: list[dict], db: Session, focus: str | None = None
+    user: User, chat_history: list[dict], db: Session, focus: str | None = None,
+    conversation_id: int | None = None,
 ) -> CareerDNA:
     dna = get_or_create_dna(user, db)
     current = dna_dict(dna)
@@ -107,12 +138,28 @@ async def refresh_dna_from_history(
             raise ValueError("bad shape")
     except Exception as exc:
         print(f"[dna] refresh skipped: {exc}")
+        # Even without the LLM, rebuild the evidence panel deterministically
+        # from what's already on record so the UI stays honest & populated.
+        cleaned = {field: _clean_list(current.get(field)) for field in PREFERENCE_FIELDS}
+        if revoked:
+            dna.excluded = _merge_excluded(dna.excluded, revoked)
+            for field in PREFERENCE_FIELDS:
+                cleaned[field] = prune(cleaned[field], revoked)
+            dna.interests = cleaned["interests"]
+            dna.subjects = cleaned["subjects"]
+            dna.skills = cleaned["skills"]
+            dna.career_zones = cleaned["career_zones"]
+            dna.goals = cleaned["goals"]
+        dna.sources = build_dna_sources(cleaned, chat_history, conversation_id)
+        db.commit()
+        _rescore_on_dna_change(user, db)
         return dna
 
     # Deterministic backstop: drop anything the student clearly revoked, even if the LLM
     # forgot to (e.g. "I don't like coding anymore" must remove coding, not keep it).
     cleaned = {field: _clean_list(result.get(field, current.get(field))) for field in PREFERENCE_FIELDS}
     if revoked:
+        dna.excluded = _merge_excluded(dna.excluded, revoked)
         for field in PREFERENCE_FIELDS:
             cleaned[field] = prune(cleaned[field], revoked)
 
@@ -131,8 +178,77 @@ async def refresh_dna_from_history(
         dna_filled=True,
     )
     new_dna = update_dna(user, update, db)
+    new_dna.sources = build_dna_sources(cleaned, chat_history, conversation_id)
+    db.commit()
+    db.refresh(new_dna)
     _archive_shift(user, current, new_dna)
     return new_dna
+
+
+_SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _msg_mentions(content: str, needle: str) -> bool:
+    """Does a user message sound like it mentions this DNA item?
+
+    Tries full-phrase match first, then token overlap, then a fuzzy ratio so
+    near-misses ('maths' vs 'math', 'robotics' vs 'robots') still count.
+    """
+    text = str(content or "").lower()
+    if not text:
+        return False
+    key = _SLUG_RE.sub(" ", needle).strip()
+    if not key:
+        return False
+    if key in text:
+        return True
+    needle_tokens = [t for t in _SLUG_RE.split(key) if len(t) >= 3]
+    if not needle_tokens:
+        return False
+    msg_tokens = [t for t in _SLUG_RE.split(text) if len(t) >= 3]
+    if not msg_tokens:
+        return False
+    if set(needle_tokens) & set(msg_tokens):
+        return True
+    for nt in needle_tokens:
+        if any(SequenceMatcher(None, nt, mt).ratio() >= 0.82 for mt in msg_tokens):
+            return True
+    return False
+
+
+def build_dna_sources(
+    cleaned: dict, chat_history: list[dict], conversation_id: int | None = None
+) -> dict:
+    """Map each DNA field back to the conversation message(s) it came from.
+
+    Deterministic evidence: for every DNA item, find the closest USER message
+    in the given history that mentions it, so the My DNA UI can honestly say
+    'Novi learned this from your chat'.
+    """
+    user_msgs = [m for m in chat_history if m.get("role") == "user"]
+    sources: dict = {}
+    for field, items in cleaned.items():
+        if not items:
+            continue
+        entries = []
+        for it in items:
+            needle = str(it).lower().strip()
+            quote = None
+            conv_id = conversation_id
+            if len(needle) >= 2:
+                for m in reversed(user_msgs):  # nearest message wins
+                    content = str(m.get("content") or "")
+                    if _msg_mentions(content, needle):
+                        quote = content.strip()
+                        conv_id = m.get("conversation_id") or conversation_id
+                        break
+            entries.append({
+                "value": it,
+                "quote": quote,
+                "conversation_id": conv_id,
+            })
+        sources[field] = entries
+    return sources
 
 
 async def build_dna_from_text(user: User, text: str, db: Session) -> CareerDNA:
@@ -171,6 +287,11 @@ async def build_dna_from_text(user: User, text: str, db: Session) -> CareerDNA:
         dna_filled=True,
     )
     new_dna = update_dna(user, update, db)
+    new_dna.sources = build_dna_sources(
+        cleaned, [{"role": "user", "content": text}], conversation_id=None
+    )
+    db.commit()
+    db.refresh(new_dna)
     _archive_shift(user, current, new_dna)
     return new_dna
 
@@ -182,39 +303,74 @@ def revoked_terms(chat_history: list[dict]) -> list[str]:
         if m.get("role") != "user":
             continue
         text = str(m.get("content") or "")
+        text = re.sub(r"\bdon\s+not\s+like\b", "don't like", text, flags=re.I)
         for match in _NEGATION_RE.finditer(text):
-            subject = _subject(text[match.end() :].split())
+            subject = _subject(text[match.end() :].split(), negative=True)
+            if subject:
+                terms.append(subject)
+        for match in _BEFORE_NEGATION_RE.finditer(text):
+            subject = _subject(match.group(1).split(), negative=True)
             if subject:
                 terms.append(subject)
         for match in _PREFER_OVER_RE.finditer(text):
-            subject = _subject(match.group(1).split())
+            subject = _subject(match.group(1).split(), negative=False)
             if subject:
                 terms.append(subject)
     return list(dict.fromkeys(t.lower() for t in terms if t))
 
 
-def _subject(words: list[str]) -> str:
-    """First meaningful multi-word topic after a signal phrase."""
-    for i, w in enumerate(words):
-        token = w.lower().strip("'\"")
-        if len(token) >= 3 and token not in _STOPWORDS:
-            pair = []
-            for j in range(i, min(i + 2, len(words))):
-                t = words[j].lower().strip("'\"")
-                if len(t) < 2 or t in _STOPWORDS:
-                    break
-                pair.append(t)
-            return " ".join(pair[:2])
-    return ""
+def _subject(words: list[str], negative: bool = True) -> str:
+    """First meaningful topic after a signal phrase.
+
+    Accepts 2-letter acronyms ('AI' -> 'ai'), tolerates 'don not' typos, and
+    drops trailing filler like 'anymore' / 'now' / 'at all' that otherwise
+    get mistaken for the actual subject.
+    """
+    cleaned = []
+    for w in words:
+        t = w.lower().strip("'\".,!?;:")
+        if not t:
+            continue
+        t = t.replace("don not", "").replace("do not", "").strip()
+        if not t:
+            continue
+        cleaned.append(t)
+    if not cleaned:
+        return ""
+    start = 0
+    while start < len(cleaned) and cleaned[start] in _STOPWORDS:
+        start += 1
+    if start >= len(cleaned):
+        return ""
+    pair = [cleaned[start]]
+    for j in range(start + 1, len(cleaned)):
+        if len(cleaned[j]) < 2 or cleaned[j].lower() in _STOPWORDS:
+            break
+        pair.append(cleaned[j])
+        break
+    return " ".join(pair[:2])
 
 
 def prune(items: list[str], revoked: list[str]) -> list[str]:
     """Remove any item that contains a revoked topic (e.g. 'coding' in 'competitive coding')."""
-    tokens = [re.escape(t) for phrase in revoked for t in phrase.split() if len(t) >= 3]
+    tokens = [re.escape(t) for phrase in revoked for t in phrase.split() if len(t) >= 2]
     if not tokens:
         return items
-    pattern = re.compile("|".join(tokens))
+    pattern = re.compile("|".join(tokens), re.I)
     return [it for it in items if not pattern.search(it.lower())]
+
+
+def _merge_excluded(existing: list | None, revoked: list[str]) -> list[str]:
+    """Persist revoked topics on the DNA, merged and deduped (case-insensitive)."""
+    seen: set[str] = set()
+    merged: list[str] = []
+    for phrase in list(existing or []) + list(revoked or []):
+        key = phrase.strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        merged.append(phrase.strip())
+    return merged
 
 
 def _archive_shift(user: User, was: dict, now: CareerDNA) -> None:

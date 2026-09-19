@@ -25,6 +25,9 @@ class CareerDNA(Base):
     novi_reflection: Mapped[str | None] = mapped_column(Text, nullable=True)
     dna_filled: Mapped[bool] = mapped_column(default=False, server_default="0")
 
+    sources: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # evidence from chats: {field: [{value, quote, conversation_id}]}
+    excluded: Mapped[list | None] = mapped_column(JSON, nullable=True)  # topics the student has moved away from, e.g. ["ai"]
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

@@ -70,6 +70,10 @@ class OllamaProvider:
             return parsed
         raise LLMError("Failed to parse JSON from Ollama")
 
+    async def complete_grounded(self, prompt: str, system: str | None = None) -> dict:
+        text = await self.complete(prompt, system=system)
+        return {"text": text, "sources": []}
+
 
 class NoviEngine:
     """Primary=Gemini, fallback=Ollama. Exposes complete / complete_json.
@@ -103,6 +107,17 @@ class NoviEngine:
         except LLMError as exc:
             self._mark_down(exc)
             return await self.fallback.complete_json(prompt, system=system)
+
+    async def complete_grounded(self, prompt: str, system: str | None = None) -> dict:
+        """Web-search grounded completion (Gemini Google Search). Falls back to
+        plain completion (no sources) when grounding is unavailable."""
+        if not self._use_primary():
+            return await self.fallback.complete_grounded(prompt, system=system)
+        try:
+            return await self.primary.complete_grounded(prompt, system=system)
+        except LLMError as exc:
+            self._mark_down(exc)
+            return await self.fallback.complete_grounded(prompt, system=system)
 
     def _mark_down(self, exc: LLMError) -> None:
         message = str(exc)

@@ -33,6 +33,7 @@ app.add_middleware(
 )
 
 app.mount("/static", StaticFiles(directory="../frontend/static"), name="static")
+app.mount("/dist", StaticFiles(directory="../frontend/dist"), name="dist")
 
 letta_service = LettaService()
 gemini_service = GeminiService()
@@ -40,7 +41,7 @@ auth_service = AuthService()
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    return FileResponse("../frontend/index.html")
+    return FileResponse("../frontend/dist/index.html")
 
 @app.post("/api/auth/signup", response_model=UserResponse)
 async def signup(user: UserCreate, db: Session = Depends(get_db)):

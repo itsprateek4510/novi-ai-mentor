@@ -284,6 +284,64 @@ class LettaClient:
         overlap = len(words_a & words_b) / min(len(words_a), len(words_b))
         return overlap >= 0.8
 
+    # ------------------------------------------------------------------ semantic dedup
+    # Conservative auxiliary check: only collapses passages that are almost certainly
+    # the SAME fact reworded (embedding cosine >= 0.92 with nomic-embed-text).
+    # Never throws: any embedding/network failure returns False and we fall back to
+    # the word-overlap check above, so archiving is never blocked or slowed hard.
+
+    _EMBED_TIMEOUT = 8.0
+    _SEMANTIC_THRESHOLD = 0.92
+
+    @staticmethod
+    def _ollama_embeddings_url() -> str:
+        """Ollama /api/embeddings endpoint (base without the /v1 suffix)."""
+        raw = (settings.OLLAMA_BASE_URL or "http://localhost:11434/v1").rstrip("/")
+        base = raw.removesuffix("/v1")
+        return f"{base}/api/embeddings"
+
+    @staticmethod
+    def _embed(text: str) -> Optional[List[float]]:
+        """768-dim nomic-embed-text vector via Ollama. None on ANY failure (never raises)."""
+        text = (text or "").strip()
+        if not text:
+            return None
+        try:
+            with httpx.Client(timeout=LettaClient._EMBED_TIMEOUT) as client:
+                resp = client.post(
+                    LettaClient._ollama_embeddings_url(),
+                    json={"model": "nomic-embed-text", "prompt": text[:1200]},
+                )
+                if resp.status_code != 200:
+                    return None
+                vec = (resp.json() or {}).get("embedding")
+                return vec if isinstance(vec, list) and vec else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _cosine(a: List[float], b: List[float]) -> float:
+        if not a or not b or len(a) != len(b):
+            return 0.0
+        dot = sum(x * y for x, y in zip(a, b))
+        na = sum(x * x for x in a) ** 0.5
+        nb = sum(y * y for y in b) ** 0.5
+        if not na or not nb:
+            return 0.0
+        return dot / (na * nb)
+
+    @classmethod
+    def _semantic_is_near_identical(cls, candidate: str, existing: str) -> bool:
+        """True only if the two are almost certainly the same fact reworded. Never throws."""
+        try:
+            va = cls._embed(candidate)
+            vb = cls._embed(existing)
+            if not va or not vb:
+                return False
+            return cls._cosine(va, vb) >= cls._SEMANTIC_THRESHOLD
+        except Exception:
+            return False
+
     def insert_archival(
         self, agent_id: str, content: str, tags: Optional[List[str]] = None, dedupe: bool = True
     ) -> bool:
@@ -295,6 +353,12 @@ class LettaClient:
                 for passage in existing:
                     base = (passage.get("text") or passage.get("content") or "").strip()
                     if base and self._is_near_duplicate(content, base):
+                        return False
+                    # semantic second pass (never-throws, conservative): collapses only
+                    # near-identical SAME-fact rewordings that word-overlap misses, so the
+                    # passage set stays deduped (fast) across years without blocking saves.
+                    if base and self._semantic_is_near_identical(content, base):
+                        print(f"[letta] semantic dedup: collapsed '{content[:80]}…'")
                         return False
             except Exception as exc:  # proceed anyway
                 print(f"[letta] dedup check failed, proceeding: {exc}")

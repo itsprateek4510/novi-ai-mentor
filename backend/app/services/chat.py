@@ -211,7 +211,7 @@ async def _auto_refresh_dna(user: User, conversation_id: int, db: Session) -> No
     chat_history = get_chat_history(user, conversation_id, db)
     if len(chat_history) < 2:
         return
-    await refresh_dna_from_history(user, chat_history, db)
+    await refresh_dna_from_history(user, chat_history, db, conversation_id=conversation_id)
 
 
 def _user_context(user: User) -> dict:

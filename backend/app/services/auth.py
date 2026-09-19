@@ -58,6 +58,17 @@ def update_profile(user: User, data: UserUpdate, db: Session) -> User:
         user.grade = data.grade
     if data.school is not None:
         user.school = data.school
+    if data.avatar is not None:
+        user.avatar = data.avatar or None
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+def change_password(user: User, current_password: str, new_password: str, db: Session) -> User:
+    if not security.verify_password(current_password, user.password_hash):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+    user.password_hash = security.hash_password(new_password)
     db.commit()
     db.refresh(user)
     return user
