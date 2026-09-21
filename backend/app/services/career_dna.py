@@ -9,6 +9,7 @@ from app.models.user import User
 from app.llm import prompts
 from app.schemas.career_dna import CareerDNAUpdate, ReflectionUpdate
 from app.services.providers import dna_dict, gemini, memory
+from app.services.student_context import load_student_context
 
 _NEGATION_RE = re.compile(
     r"\b(?:don'?t\s*(?:not\s+)?like|do\s+not\s+like|not a fan of|not interested in|lost interest in|"
@@ -124,11 +125,13 @@ async def refresh_dna_from_history(
     dna = get_or_create_dna(user, db)
     current = dna_dict(dna)
     revoked = revoked_terms(chat_history)
+    ctx = load_student_context(db, user)
     student = {
         "name": user.display_name,
         "grade": user.grade,
         "school": user.school,
     }
+    student.update(ctx)
     try:
         result = await gemini.complete_json(
             prompts.career_dna_prompt(chat_history, current, student),
@@ -141,6 +144,7 @@ async def refresh_dna_from_history(
         # Even without the LLM, rebuild the evidence panel deterministically
         # from what's already on record so the UI stays honest & populated.
         cleaned = {field: _clean_list(current.get(field)) for field in PREFERENCE_FIELDS}
+        _anchor_context(ctx, cleaned)
         if revoked:
             dna.excluded = _merge_excluded(dna.excluded, revoked)
             for field in PREFERENCE_FIELDS:
@@ -162,6 +166,7 @@ async def refresh_dna_from_history(
         dna.excluded = _merge_excluded(dna.excluded, revoked)
         for field in PREFERENCE_FIELDS:
             cleaned[field] = prune(cleaned[field], revoked)
+    _anchor_context(ctx, cleaned)
 
     update = CareerDNAUpdate(
         traits=_clean_list(result.get("traits", current.get("traits"))),
@@ -255,11 +260,13 @@ async def build_dna_from_text(user: User, text: str, db: Session) -> CareerDNA:
     """One-shot DNA build from a student's own words (no chat history needed)."""
     dna = get_or_create_dna(user, db)
     current = dna_dict(dna)
+    ctx = load_student_context(db, user)
     student = {
         "name": user.display_name,
         "grade": user.grade,
         "school": user.school,
     }
+    student.update(ctx)
     try:
         result = await gemini.complete_json(
             prompts.dna_from_text_prompt(text, current, student),
@@ -272,6 +279,7 @@ async def build_dna_from_text(user: User, text: str, db: Session) -> CareerDNA:
         raise ValueError("Novi couldn't read that just yet — try telling her a little more") from exc
 
     cleaned = {field: _clean_list(result.get(field, current.get(field))) for field in PREFERENCE_FIELDS}
+    _anchor_context(ctx, cleaned)
     update = CareerDNAUpdate(
         traits=_clean_list(result.get("traits", current.get("traits"))),
         motivations=cleaned["motivations"],
@@ -401,6 +409,39 @@ def _clean_list(value) -> list:
     if isinstance(value, list):
         return [str(v).strip() for v in value if str(v).strip()]
     return [str(value).strip()] if str(value).strip() else []
+
+
+def _anchor_context(ctx: dict, cleaned: dict) -> dict:
+    """Deterministically ground the DNA in what onboarding explicitly captured.
+
+    Merges the student's own answers (enjoyed/difficult subjects, strengths,
+    activities, motivators, a self-declared career, a stated life goal) into the
+    LLM output so downstream matching can always see them — the LLM stays the
+    primary author, this only guarantees the explicit answers survive.
+    """
+    anchors = {
+        "subjects": ctx.get("subjects_enjoyed") or [],
+        "strengths": ctx.get("strengths") or [],
+        "interests": ctx.get("interests") or [],
+        "motivations": ctx.get("motivators") or [],
+        "goals": ctx.get("goals") or [],
+    }
+    from app.services.student_context import career_in_mind_phrase
+
+    career = career_in_mind_phrase(ctx)
+    if career:
+        anchors["career_zones"] = [career]
+    anchors["values"] = list(ctx.get("motivators") or [])
+
+    for field, explicit in anchors.items():
+        current = _clean_list(cleaned.get(field))
+        merged = list(current)
+        for item in explicit:
+            key = str(item).strip().lower()
+            if key and key not in {str(x).strip().lower() for x in merged}:
+                merged.append(str(item).strip())
+        cleaned[field] = merged
+    return cleaned
 
 
 def reflect_dna(user: User, data: ReflectionUpdate, db: Session) -> CareerDNA:

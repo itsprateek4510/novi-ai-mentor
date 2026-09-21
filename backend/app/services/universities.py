@@ -9,6 +9,11 @@ from app.llm import prompts
 from app.schemas.university import ReadinessRequest, UniversityFilters
 from app.services.career_dna import get_dna
 from app.services.providers import dna_dict, gemini, memory
+from app.services.student_context import (
+    career_in_mind_phrase,
+    load_student_context,
+    norm_country,
+)
 
 
 def search_universities(db: Session, filters: UniversityFilters) -> list[University]:
@@ -111,6 +116,8 @@ async def readiness(db: Session, user: User, request: ReadinessRequest) -> Unive
 
     dna = get_dna(user, db)
     profile = _profile_summary(db, user)
+    student = {"name": user.display_name, "grade": user.grade, "school": user.school}
+    student.update(load_student_context(db, user))
 
     assessment = None
     try:
@@ -128,7 +135,7 @@ async def readiness(db: Session, user: User, request: ReadinessRequest) -> Unive
                 },
                 dna_dict(dna),
                 profile,
-                {"name": user.display_name, "grade": user.grade, "school": user.school},
+                student,
             ),
             system=prompts.UNIVERSITY_READINESS_SYSTEM,
         )
@@ -175,10 +182,13 @@ def recent_matches(db: Session, user: User) -> list[UniversityMatch]:
 
 
 def recommend(db: Session, user: User, limit: int = 6) -> list[dict]:
-    """DNA-grounded university recommendations — rank programs by how well they align
-    with the student's career zones, interests, subjects and goals. Deterministic and
-    fast (no LLM). Falls back to recent readiness checks when the DNA is not filled."""
+    """Context-grounded university recommendations — rank programs by how well they
+    align with the student's Career DNA **plus** the onboarding context they gave
+    (target country, dreamed-of universities, enjoyed subjects, a career in mind).
+    Deterministic and fast (no LLM). Falls back to recent readiness checks when the
+    DNA is not filled."""
     dna = get_dna(user, db)
+    ctx = load_student_context(db, user)
     buckets: dict[str, list[str]] = {
         "career_zones": (dna.career_zones or []) if dna else [],
         "interests": (dna.interests or []) if dna else [],
@@ -188,8 +198,18 @@ def recommend(db: Session, user: User, limit: int = 6) -> list[dict]:
     }
     weights = {"career_zones": 4, "goals": 3, "interests": 3, "subjects": 2, "skills": 1}
     phrases = [p for arr in buckets.values() for p in arr if p and len(p.strip()) > 1]
-    if not phrases:
+    has_context = any(
+        (ctx.get("country_preference"), ctx.get("study_destination"),
+         ctx.get("dream_universities"), ctx.get("subjects_enjoyed"), career_in_mind_phrase(ctx))
+    )
+    if not phrases and not has_context:
         return recent_matches(db, user)
+
+    dest_key = (ctx.get("country_preference") or "").strip()
+    dream = (ctx.get("dream_universities") or "").strip().lower()
+    career = career_in_mind_phrase(ctx)
+    career_toks = _tok(career) if career else set()
+    subjects_ctx = [str(s).strip().lower() for s in (ctx.get("subjects_enjoyed") or []) if str(s).strip()]
 
     catalog = list(db.scalars(select(University).order_by(University.ranking.asc()).limit(80)))
     scored: list[dict] = []
@@ -197,6 +217,7 @@ def recommend(db: Session, user: User, limit: int = 6) -> list[dict]:
         hay = " ".join(
             [uni.course or "", uni.subject or "", " ".join(uni.strengths or []), uni.about or ""]
         ).lower()
+        hay_toks = _tok(hay)
         alignment = 0
         best_field, best_phrase = None, None
         for field, arr in buckets.items():
@@ -206,11 +227,38 @@ def recommend(db: Session, user: User, limit: int = 6) -> list[dict]:
                     alignment += weights[field]
                     if best_field is None or weights[field] > weights.get(best_field, 0):
                         best_field, best_phrase = field, phrase
+        reasons_extra: list[str] = []
+        dream_hit = False
+
+        if dest_key and norm_country(uni.country) == dest_key:
+            alignment += 8
+            reasons_extra.append(
+                f"You told Novi you want to study in {ctx['study_destination']} — this is in your target country."
+            )
+        for subject in subjects_ctx:
+            match = subject in hay or subject.rstrip("s") in hay or any(
+                w.startswith(subject.rstrip("s")) for w in hay.split()
+            )
+            if match:
+                alignment += 3
+                reasons_extra.append(f"{subject.title()} is one of the subjects you enjoy.")
+                break
+        if career_toks and career_toks & hay_toks:
+            alignment += 6
+            reasons_extra.append(f"Programs here connect to {career}, which you have in mind.")
+        if dream and uni.name.lower() in dream:
+            alignment += 30
+            dream_hit = True
+            reasons_extra.insert(0, f"You mentioned {uni.name} yourself — it's at the top of your list.")
+
         if alignment == 0:
             continue
         readiness = _heuristic_readiness(user, uni, dna)["readiness"]
-        readiness = min(98, readiness + min(18, alignment * 2))
-        reason = _reason(best_field, best_phrase)
+        aligned = min(18, alignment * 2)
+        if dream_hit:
+            aligned = max(aligned, 25)
+        readiness = min(98, readiness + aligned)
+        base_reason = _reason(best_field, best_phrase)
         scored.append(
             {
                 "id": uni.id,
@@ -223,7 +271,7 @@ def recommend(db: Session, user: User, limit: int = 6) -> list[dict]:
                     "Explore scholarship and application timelines",
                 ],
                 "university": uni,
-                "reason": reason,
+                "reason": " ".join(reasons_extra) + " " + base_reason if reasons_extra else base_reason,
             }
         )
     scored.sort(key=lambda m: m["readiness"], reverse=True)
@@ -241,6 +289,13 @@ def _reason(field: str | None, phrase: str | None) -> str:
     if field and phrase:
         return f"Coursework aligned with {phrase.lower()} — {labels.get(field, 'your profile')}."
     return "Program broadly aligned with your profile."
+
+
+def _tok(text: str | None) -> set[str]:
+    """Significant lowercase tokens for phrase-matching (drops 1-letter words)."""
+    if not text:
+        return set()
+    return {t for t in re.split(r"[^a-z0-9]+", text.lower()) if len(t) > 1 and not t.isdigit()}
 
 
 def average_readiness(db: Session, user: User) -> int:
@@ -313,6 +368,7 @@ async def advice(
     """Return a personalized, web-grounded "which university is best" answer."""
     dna = get_dna(user, db)
     student = {"name": user.display_name, "grade": user.grade, "school": user.school}
+    student.update(load_student_context(db, user))
 
     if university_ids:
         stmt = select(University).where(University.id.in_(university_ids)).limit(10)

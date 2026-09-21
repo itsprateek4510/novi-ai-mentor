@@ -6,9 +6,12 @@
 
 export const API = "/api/v1";
 
-let _token = localStorage.getItem("novi_token") || null;
+let _token = null;
 export function setApiToken(t) { _token = t; }
-export function getApiToken() { return _token; }
+export function getApiToken() {
+  if (_token === null && typeof window !== "undefined") _token = window.localStorage.getItem("novi_token");
+  return _token;
+}
 
 const _apiCache = new Map();     // "GET /path" -> { data, ts }
 const _apiInflight = new Map();  // "GET /path" -> Promise
@@ -17,7 +20,7 @@ const API_TTL = 15000;
 
 function _headers() {
   const h = { "Content-Type": "application/json" };
-  if (_token) h.Authorization = `Bearer ${_token}`;
+  if (getApiToken()) h.Authorization = `Bearer ${getApiToken()}`;
   return h;
 }
 
@@ -162,17 +165,17 @@ let _warmAllStarted = false;
 export function resetWarmAll() { _warmAllStarted = false; }
 
 export function warmRoute(key) {
-  if (!_token) return;
+  if (!getApiToken()) return;
   (ROUTE_WARM[key] || []).forEach((p) => { if (!_apiCache.has("GET " + p)) api(p).catch(() => {}); });
 }
 
 export function warmAllRoutes() {
-  if (_warmAllStarted || !_token) return;
+  if (_warmAllStarted || !getApiToken()) return;
   _warmAllStarted = true;
   const keys = Object.keys(ROUTE_WARM);
   let i = 0;
   const step = () => {
-    if (!_token || i >= keys.length) return;
+    if (!getApiToken() || i >= keys.length) return;
     warmRoute(keys[i++]);
     setTimeout(step, 220);
   };
@@ -256,7 +259,7 @@ export const PS_NOTIFS = [
   ["digest", "NOVI digest", "A monthly recap of your wins, skills and progress."],
 ];
 
-export const PS_DEFAULTS = { checkin_reminders: true, career_alerts: true, goal_nudges: true, parent_updates: true, digest: false, appearance: "aurora" };
+export const PS_DEFAULTS = { checkin_reminders: true, career_alerts: true, goal_nudges: true, parent_updates: true, digest: false, appearance: "aurora", theme: null };
 
 function hexToRgba(hex, alpha) {
   const n = parseInt(hex.slice(1), 16);
@@ -286,6 +289,7 @@ export function bootAppearance() {
   try {
     const prefs = readPrefs();
     if (prefs.appearance) applyAccent(prefs.appearance);
+    applyTheme(prefs.theme);
   } catch (_) {}
 }
 
@@ -294,4 +298,21 @@ export function setPrefKey(key, value) {
   p[key] = value;
   savePrefs(p);
   return p;
+}
+
+function systemTheme() {
+  return typeof window !== "undefined" && window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+}
+
+export function applyTheme(theme) {
+  const t = theme === "light" || theme === "dark" ? theme : systemTheme();
+  document.documentElement.setAttribute("data-theme", t);
+  const m = document.querySelector('meta[name="theme-color"]');
+  if (m) m.setAttribute("content", t === "light" ? "#f3f5fb" : "#060a13");
+  return t;
+}
+
+export function getTheme() {
+  const p = readPrefs();
+  return p.theme === "light" || p.theme === "dark" ? p.theme : systemTheme();
 }

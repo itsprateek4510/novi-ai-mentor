@@ -1,54 +1,97 @@
-services:
+﻿services:
   letta:
-    image: letta/letta:latest
-    container_name: novi_letta
-    ports:
-      - "8283:8283"
+    # Pinned to the last "Python server" LettA image (the REST server on :8283 the
+    # letta-client SDK targets). letta/letta:latest is now the LettA Code app which
+    # no longer serves the /v1 REST API this app integration relies on.
+    image: letta/letta:0.16.8
+    restart: unless-stopped
     environment:
-      - LETTA_PG_URI=postgresql://novi_user:novi_password_2024@letta_db:5432/letta
       - GEMINI_API_KEY=${GEMINI_API_KEY}
-      - OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
-      - SECURE=true
-      - LETTA_SERVER_PASSWORD=${LETTA_SERVER_PASSWORD}
-      - LETTA_ENCRYPTION_KEY=dummy-encryption-key-32-chars-long!!
-    volumes:
-      - letta_data:/root/.letta
+      - LETTA_PG_URI=postgresql://novi:novi@postgres:5432/letta
     depends_on:
-      letta_db:
+      postgres:
         condition: service_healthy
     networks:
-      - novi_network
+      - novi-net
 
-  letta_db:
+  postgres:
     image: pgvector/pgvector:pg16
-    container_name: novi_letta_db
     environment:
-      POSTGRES_USER: novi_user
-      POSTGRES_PASSWORD: novi_password_2024
+      POSTGRES_USER: novi
+      POSTGRES_PASSWORD: novi
       POSTGRES_DB: letta
     volumes:
-      - letta_pg_data:/var/lib/postgresql/data
+      - letta_pg_016_data:/var/lib/postgresql/data
       - ./pg_init:/docker-entrypoint-initdb.d
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U novi_user -d letta"]
+      test: ["CMD-SHELL", "pg_isready -U novi -d letta"]
       interval: 5s
       timeout: 5s
       retries: 10
     networks:
-      - novi_network
+      - novi-net
 
   redis:
     image: redis:alpine
-    container_name: novi_redis
-    ports:
-      - "6379:6379"
     networks:
-      - novi_network
+      - novi-net
+
+  mysql:
+    image: mysql:8.0
+    command: ["--default-authentication-plugin=mysql_native_password"]
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-@Rajendra5109}
+      MYSQL_DATABASE: ${MYSQL_DB:-novi_db}
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-@Rajendra5109}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - novi-net
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: novi_backend
+    # Everything not explicitly overridden below (GOOGLE_CLIENT_ID,
+    # GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI, GEMINI_API_KEY, FRONTEND_URL, ...)
+    # is sourced from backend/.env so Google OAuth works identically in Docker
+    # and when run natively. Explicit `environment` entries win over this file.
+    env_file:
+      - ./backend/.env
+    environment:
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - DB_USER=root
+      - DB_PASSWORD=${MYSQL_ROOT_PASSWORD:-@Rajendra5109}
+      - DB_NAME=${MYSQL_DB:-novi_db}
+      - SECRET_KEY=${SECRET_KEY:-novi-secret-key-change-in-production}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - LETTA_BASE_URL=http://letta:8283
+      - INTERNAL_CALLBACK_BASE_URL=http://backend:8000
+      - INTERNAL_SHARED_SECRET=${INTERNAL_SHARED_SECRET}
+    networks:
+      - novi-net
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      letta:
+        condition: service_started
+    ports:
+      - "8000:8000"
 
 volumes:
-  letta_data:
-  letta_pg_data:
+  letta_pg_016_data:
+  mysql_data:
 
 networks:
-  novi_network:
+  novi-net:
     driver: bridge

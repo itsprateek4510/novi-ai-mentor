@@ -11,6 +11,7 @@ from app.llm import prompts
 from app.schemas.career import CareerMatchRequest
 from app.services.career_dna import get_dna, get_or_create_dna
 from app.services.providers import dna_dict, gemini, memory
+from app.services.student_context import career_in_mind_phrase, load_student_context
 
 
 def search_careers(db: Session, q: str | None = None, category: str | None = None, limit: int = 50) -> list[Career]:
@@ -226,13 +227,32 @@ def _score_career(c: Career, dna) -> tuple[float, list[str]]:
     return score, reasons[:4]
 
 
-def _score_catalog(db: Session, dna) -> list[dict]:
+def _score_catalog(db: Session, dna, ctx: dict | None = None) -> list[dict]:
     """Deterministic scores for every career in the catalog, best first."""
     catalog = search_careers(db, limit=500)
     scored = []
     for c in catalog:
         base, base_reasons = _score_career(c, dna)
         scored.append({"slug": c.slug, "score": base, "reasons": base_reasons})
+
+    # The student's self-declared career is the single strongest signal we have:
+    # any catalog career that matches its name/category gets a hard boost so the
+    # stated goal can never lose to a vague preference overlap.
+    career = career_in_mind_phrase(ctx) if ctx else None
+    if career:
+        want = _tokens(career)
+        for item in scored:
+            c = next((x for x in catalog if x.slug == item["slug"]), None)
+            if not c:
+                continue
+            both = want & _tokens(_norm(c.title, c.category))
+            if both:
+                item["score"] = min(98.0, item["score"] + 20.0)
+                item["reasons"] = (
+                    item["reasons"]
+                    + [f"You told Novi you have {career} in mind — this career matches that goal."]
+                )[:4]
+
     scored.sort(key=lambda x: x["score"], reverse=True)
     return scored
 
@@ -273,7 +293,8 @@ def rescore_matches(db: Session, user: User, limit: int = 1) -> list[CareerMatch
     the Careers page always reflects what they believe now — no stale picks.
     """
     dna = get_or_create_dna(user, db)
-    scored = _score_catalog(db, dna)
+    ctx = load_student_context(db, user)
+    scored = _score_catalog(db, dna, ctx)
     stored = _store_matches(db, user, scored, limit)
     if stored:
         memory.archive(
@@ -287,7 +308,8 @@ def rescore_matches(db: Session, user: User, limit: int = 1) -> list[CareerMatch
 
 async def match_careers(db: Session, user: User, request: CareerMatchRequest) -> list[CareerMatch]:
     dna = get_or_create_dna(user, db)
-    scored = _score_catalog(db, dna)
+    ctx = load_student_context(db, user)
+    scored = _score_catalog(db, dna, ctx)
 
     # 2) Gemini may only *refine* the top candidates' reasons — the ordering
     #    and scores always stay deterministic and logical.
@@ -354,6 +376,7 @@ async def career_advice(db: Session, user: User, career: Career) -> dict:
 
     dna = get_dna(user, db)
     student = {"name": user.display_name, "grade": user.grade, "school": user.school}
+    student.update(load_student_context(db, user))
     grade = user.grade or 9
 
     roadmap_items = [

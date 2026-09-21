@@ -92,10 +92,10 @@ novi_tech_app/
 │   ├── requirements.txt   # Python dependencies
 │   └── .env              # Environment variables
 ├── frontend/
-│   ├── index.html         # Main chat interface
+│   ├── app/                # Next.js (App Router) routes
+│   ├── src/views/          # Page components
 │   └── static/
-│       ├── styles.css     # Styling
-│       └── app.js         # Frontend logic
+│       └── styles.css      # Styling (served by FastAPI at /static/*)
 └── README.md
 ```
 
@@ -193,7 +193,7 @@ The API also talks to two LLM backends:
 
 ```mermaid
 flowchart TB
-    Browser -->|"GET /  (index.html + static/app.js)"| FastAPI
+    Browser -->|"Next.js app → /api/v1/*"| FastAPI
     subgraph Backend[FastAPI :8000  backend/app]
         FastAPI --> Auth["core/security.py + core/deps.py (JWT)"]
         Auth --> Routes["api/*.py routers"]
@@ -235,14 +235,16 @@ by `backend/.env`:
 | `LETTA_BASE_URL` / `LETTA_ENABLED` | `http://localhost:8283` / `true` | Memory server |
 | `LETTA_MODEL` | `ollama/llama3.2:3b` | Model driving each agent |
 
-### 1.4 Frontend: two bundles
+### 1.4 Frontend: Next.js app + legacy bundle
 
-- **Served app**: `frontend/index.html` loads the single-file legacy bundle
-  `frontend/static/app.js` (plain JS, no module system) plus `frontend/static/styles.css`.
-  This is what actually runs in the browser (paths `/` and `/static/*`).
-- **React tree**: `frontend/src/` (React 18 + Vite) exists as the newer rewrite
-  (`frontend/src/pages/RoadmapPage.jsx`, etc.) but is **not** the deployed bundle; keep
-  feature work in sync with both where applicable.
+- **Next.js app (current)**: `frontend/` is a Next.js (App Router) React app — a client-side
+  SPA for auth/API (token in `localStorage`, `next.config.mjs` proxies `/api/*` and
+  `/static/*` to the backend). Routes live in `frontend/app/` as thin gated wrappers around
+  the page components in `frontend/src/views/`. Run with `npm --prefix frontend run dev`
+  (http://localhost:3000) or `next build && next start` for production.
+- **Static assets**: `frontend/static/` holds plain CSS imported by the Next.js layout
+  (served by FastAPI at `/static/*`). The legacy vanilla-JS SPA (`frontend/static/app.js`,
+  which drove the old `/index.html`) was removed along with the legacy onboarding engine.
 
 ### 1.5 Resilience & fallbacks
 
@@ -257,6 +259,45 @@ by `backend/.env`:
   LLM fails.
 - **Dedup**: archival dedup is never authoritative-blocking — if the dedup check itself
   fails it proceeds to save.
+
+### 1.6 Onboarding engine (15 steps)
+
+The **15-step conversational engine** (`app/routers/onboarding.py`, backed by the
+`ONBOARDING_STEPS` registry in `app/onboarding/steps.py`) is the only onboarding
+engine. The legacy 34-step flow engine (`app/api/onboarding.py` →
+`app/services/onboarding_flow.py`) was removed; all of its routes are now served
+by the new engine at `/api/v1/onboarding/*`:
+
+| Route                       | Purpose                                                        |
+|-----------------------------|----------------------------------------------------------------|
+| `GET /state`                | current step (options pre-resolved server-side)                |
+| `GET /countries` etc.       | reference catalog (countries / curriculums / grades / subjects)|
+| `POST /answer`              | validate + save an answer, advance (OnboardingChat)            |
+| `GET /flow`                 | flow-state shape (`started`/`done`/`percent`/`current`/...)    |
+| `POST /flow/start`          | ensure a flow exists                                           |
+| `POST /flow/answer`         | legacy answer protocol `{step_id, answer\|values}`             |
+| `POST /flow/skip`           | record a skip and advance                                      |
+| `POST /flow/reset`          | wipe this student's onboarding + start again                   |
+| `POST /voice/speak`         | ElevenLabs TTS (`StreamingResponse`, audio/mpeg)               |
+| `POST /voice/transcribe`    | ElevenLabs STT (multipart upload)                              |
+| `POST /voice/answer`        | resolve spoken answer → valid value + submit                   |
+
+- **Steps**: `name, country, curriculum, grade, saturday, strengths,
+  enjoyed_subjects, hard_subjects, learning_style, confidence, university, career,
+  career_name, career_reason, primary_goal`. Cascading lookups flow
+  country → curriculum → grade (→ subjects). Selecting **"No idea"** on the career
+  step skips `career_name`/`career_reason`.
+- **Completing onboarding** kicks off a background finalize: Career DNA refresh,
+  career matching, passport refresh and an auto-generated roadmap — all grounded in
+  the 15-step answers (`app/routers/onboarding.py::_finalize_after_onboarding`),
+  so the completion request returns instantly even when the LLM is slow.
+- **Voice**: uses ElevenLabs (`ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID`,
+  `ELEVENLABS_MODEL_ID`) with Gemini fallback resolution; without/expired ElevenLabs
+  keys the `/voice/*` endpoints return `502`.
+- **TTS fallback**: the onboarding frontend (`speech.js`) plays each question via
+  `/voice/speak` (ElevenLabs) and, whenever that API is unavailable (missing/expired key,
+  non-2xx incl. `402`, empty/non-audio response), falls back to the browser's Web Speech
+  API (`window.speechSynthesis`). No key or payment needed for the fallback to work.
 
 ---
 
@@ -407,7 +448,8 @@ by `app/services/m3_bridge.py` so legacy features and m3 views stay consistent.
 `created_at` · `updated_at`
 
 #### `m3_goals`
-`id` (UUID PK) · `student_id` FK→m3_students · `goal_type` · `title` · `description` ·
+`id` (UUID PK) · `student_id` FK→m3_students · `legacy_goal_id` (int, indexed — mirror of
+legacy `goals.id`, nullable) · `goal_type` · `title` · `description` ·
 `target_date` · `status` · `priority` · `career_id` FK→m3_careers (nullable) ·
 `career_match_id` FK→m3_career_matches (nullable) · `created_at` · `updated_at`
 
@@ -484,6 +526,8 @@ Not MySQL — Letta's own PostgreSQL (`novi_letta_db`, user `novi_user`). Key co
   `universities` catalogs.
 - `backend/app/db/init_db.py` — `python -m app.db.init_db` creates all tables (legacy +
   m3) and seeds; `--reset` drops everything first.
+- New schema changes go in `backend/migrations/000X_*.sql` — these run automatically
+  on startup, but always confirm via `SELECT * FROM schema_migrations` after deploying.
 
 ---
 

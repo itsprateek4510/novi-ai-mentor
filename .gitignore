@@ -1,36 +1,102 @@
-# Environment / secrets - NEVER commit
+# ---------------------------------------------------------------------------
+# Secrets & environment files - NEVER commit
+# ---------------------------------------------------------------------------
 .env
-backend/.env
+.env.*
 *.env
 *.env.local
-.env.*
+*.env.production
+.envrc
+.direnv/
 !.env.example
+!*.env.example
+!.env.test
 
-# Python
-__pycache__/
+# ---------------------------------------------------------------------------
+# FUSE / merged-filesystem ghost artifacts (common on this host)
+# ---------------------------------------------------------------------------
+.fuse_hidden*
+*.fuse_hidden*
+
+# ---------------------------------------------------------------------------
+# Node / frontend
+# ---------------------------------------------------------------------------
+node_modules/
+frontend/node_modules/
+*.tsbuildinfo
+*.eslintcache
+.eslintcache
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+frontend/.next/
+frontend/.next.ghost/
+frontend/.next.old/
+frontend/.next.prod/
+frontend/out/
+frontend/dist/
+frontend/coverage/
+frontend/public/uploads/
+
+# ---------------------------------------------------------------------------
+# Python / backend
+# ---------------------------------------------------------------------------
+venv/
+.venv/
+env/
+ENV/
+*.egg-info/
+.eggs/
 *.py[cod]
 *$py.class
-.venv/
-venv/
-env/
-*.egg-info/
+__pycache__/
+*.sqlite3
+.db/
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+*.manifest
+*.spec
+.python-version
 
-# Runtime logs
+# ---------------------------------------------------------------------------
+# Runtime data & logs
+# ---------------------------------------------------------------------------
 *.log
-/tmp/
+logs/
+data/
+data/*
+!data/.gitkeep
+pgdata/
+pg_log/
+storage/
+tmp/
+*.pid
+*.seed
+*.pid.lock
 
-# OS / editor
+# ---------------------------------------------------------------------------
+# IDE & OS
+# ---------------------------------------------------------------------------
 .DS_Store
+Thumbs.db
 .idea/
 .vscode/
 *.swp
+*.swo
+*~
+*.orig
+*.rej
 
-# Docker / local data
-data/
+# ---------------------------------------------------------------------------
+# Docker / local services
+# ---------------------------------------------------------------------------
 pgdata/
-
-# Frontend build artifacts
-frontend/node_modules/
-frontend/dist/
+letsencrypt/
+certbot/

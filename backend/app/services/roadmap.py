@@ -19,7 +19,9 @@ from app.schemas.roadmap import (
     TaskUpdate,
 )
 from app.services.career_dna import get_dna
+from app.services import m3_bridge
 from app.services.providers import dna_dict, gemini, memory
+from app.services.student_context import load_student_context
 
 GRADE_STAGE = {
     9: RoadmapStage.DISCOVER,
@@ -58,17 +60,15 @@ def create_goal(db: Session, user: User, data: GoalCreate) -> Goal:
     db.add(goal)
     db.commit()
     db.refresh(goal)
+    try:
+        m3_bridge.sync_goal_to_m3(db, user, goal)
+    except Exception as exc:
+        print(f"[roadmap] m3 goal sync failed: {exc}")
     memory.archive(
         user,
         f"User set a goal: {goal.title} ({goal.category.value}).",
         ("roadmap", "goal"),
     )
-    try:
-        from app.services import m3_bridge
-
-        m3_bridge.sync_goal_to_m3(db, user, goal, commit=True)
-    except Exception as exc:
-        print(f"[roadmap] m3 goal sync failed: {exc}")
     return goal
 
 
@@ -110,8 +110,6 @@ def list_goals(db: Session, user: User) -> list[Goal]:
 
 
 def update_goal(db: Session, user: User, goal_id: int, data: GoalUpdate) -> Goal | None:
-    from app.services import m3_bridge
-
     goal = db.get(Goal, goal_id)
     if not goal or goal.user_id != user.id:
         return None
@@ -120,30 +118,26 @@ def update_goal(db: Session, user: User, goal_id: int, data: GoalUpdate) -> Goal
     if data.description is not None:
         goal.description = data.description
 
-    status = data.status
-    if status == "done":
-        goal.status = GoalStatus.COMPLETED
-    elif status == "cancelled":
-        goal.status = GoalStatus.PAUSED
-    elif status is not None and status in GoalStatus._value2member_map_:
-        goal.status = GoalStatus(status)
+    _STATUS_ALIASES = {"done": "completed", "cancelled": "paused"}
+    raw_status = data.status or goal.status.value
+    mapped_status = _STATUS_ALIASES.get(raw_status, raw_status)
+    if mapped_status in GoalStatus._value2member_map_:
+        goal.status = GoalStatus(mapped_status)
 
     db.commit()
     db.refresh(goal)
 
     try:
-        m3_bridge.sync_goal_to_m3(db, user, goal, commit=True)
-        if status == "done":
+        if goal.status == GoalStatus.COMPLETED:
+            # Mark the m3 mirror + any active m3 roadmap completed too.
+            m3_bridge.sync_goal_to_m3(db, user, goal)
             m3_bridge.set_goal_roadmap_status(db, user, goal, "completed")
-            m3_goal = m3_bridge.m3_goal_for(db, user, goal)
-            if m3_goal is not None and m3_goal.status != "completed":
-                m3_goal.status = "completed"
-                db.commit()
-        elif status == "cancelled":
-            m3_bridge.set_goal_roadmap_status(db, user, goal, "abandoned")
+        elif goal.status == GoalStatus.PAUSED:
+            # Pausing abandons the scheduled plan and drops its legacy items.
             for old in db.scalars(select(RoadmapItem).where(RoadmapItem.goal_id == goal.id)):
                 db.delete(old)
             db.commit()
+            m3_bridge.set_goal_roadmap_status(db, user, goal, "abandoned")
     except Exception as exc:
         print(f"[roadmap] m3 sync failed: {exc}")
         db.rollback()
@@ -173,6 +167,8 @@ async def generate_roadmap(
         raise ValueError("A goal is required")
 
     dna = get_dna(user, db)
+    student = {"name": user.display_name, "grade": user.grade, "school": user.school}
+    student.update(load_student_context(db, user))
 
     chat_context = ""
     if request.text:
@@ -189,7 +185,7 @@ async def generate_roadmap(
             result = await gemini.complete_json(
                 prompts.roadmap_text_prompt(
                     {"title": goal.title, "description": goal.description, "category": goal.category.value},
-                    {"name": user.display_name, "grade": user.grade},
+                    student,
                     dna_dict(dna),
                     request.text,
                     chat_context,
@@ -210,7 +206,7 @@ async def generate_roadmap(
                 result = await gemini.complete_json(
                     prompts.roadmap_prompt(
                         {"title": goal.title, "description": goal.description, "category": goal.category.value},
-                        {"name": user.display_name, "grade": user.grade},
+                        student,
                         dna_dict(dna),
                     ),
                     system=prompts.ROADMAP_SYSTEM,
@@ -325,6 +321,8 @@ def week_start(d: date | None = None) -> date:
 async def generate_priorities(db: Session, user: User, request: PriorityGenerateRequest) -> list[WeeklyPriority]:
     start = week_start()
     dna = get_dna(user, db)
+    student = {"name": user.display_name, "grade": user.grade, "school": user.school}
+    student.update(load_student_context(db, user))
     goals = list_goals(db, user)
     active_goals = [{"title": g.title, "category": g.category.value} for g in goals]
     incomplete = [
@@ -338,7 +336,7 @@ async def generate_priorities(db: Session, user: User, request: PriorityGenerate
     try:
         result = await gemini.complete_json(
             prompts.weekly_priorities_prompt(
-                {"name": user.display_name, "grade": user.grade}, dna_dict(dna), active_goals, incomplete
+                student, dna_dict(dna), active_goals, incomplete
             ),
             system=prompts.WEEKLY_PRIORITIES_SYSTEM,
         )

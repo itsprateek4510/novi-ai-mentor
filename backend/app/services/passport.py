@@ -11,6 +11,7 @@ from app.models.user import User
 from app.schemas.passport import PassportItemCreate, PassportItemUpdate
 from app.services.career_dna import get_dna
 from app.services.providers import gemini, memory
+from app.services.student_context import load_student_context
 
 CORE_CATEGORIES = (
     "projects", "competitions", "certifications", "leadership", "research", "activities",
@@ -227,6 +228,13 @@ def completion(db: Session, user: User) -> dict:
     focus = None
     if dna:
         focus = (dna.career_zones or [None])[0] or (dna.interests or [None])[0]
+    if not focus:
+        ctx = load_student_context(db, user)
+        focus = (
+            ctx.get("career_in_mind_phrase")
+            or (ctx.get("interests") or [None])[0]
+            or (ctx.get("goals") or [None])[0]
+        )
     dna_focus = focus or "your strongest career direction"
 
     if by_category[weakest] == 0:

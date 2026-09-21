@@ -25,11 +25,29 @@ class GeminiProvider(LLMProvider):
     async def _throttle(self) -> None:
         await asyncio.sleep(self.min_delay)
 
+    @staticmethod
+    def _retry_delay(exc: Exception) -> float | None:
+        """Pull the server's suggested retry delay from error text (RetryInfo)."""
+        msg = str(exc)
+        m = re.search(r"retry\s*(?:in|after)?\s*(?:[:(]?\s*)?(\d+(?:\.\d+)?)\s*s?", msg, re.I)
+        if not m:
+            m = re.search(r'"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s?"', msg)
+        if not m:
+            return None
+        delay = float(m.group(1))
+        return min(max(delay, 2.0), 45.0)
+
+    @staticmethod
+    def _transient(exc: Exception) -> bool:
+        msg = str(exc)
+        return any(k in msg for k in ("429", "RESOURCE_EXHAUSTED", "503", "UNAVAILABLE"))
+
     async def complete(self, prompt: str, system: str | None = None) -> str:
         if not self._api_key:
             raise LLMError("GEMINI_API_KEY is not configured")
 
-        for attempt in range(2):
+        attempts = 4
+        for attempt in range(attempts):
             try:
                 await self._throttle()
                 contents = [system or "", prompt] if system else [prompt]
@@ -43,8 +61,10 @@ class GeminiProvider(LLMProvider):
                     raise LLMError("Empty Gemini response")
                 return text
             except Exception as exc:  # pylint: disable=broad-except
-                if attempt == 0 and ("429" in str(exc) or "RESOURCE_EXHAUSTED" in str(exc)):
-                    await asyncio.sleep(6)
+                if self._transient(exc) and attempt < attempts - 1:
+                    delay = self._retry_delay(exc) or (8 if attempt == 0 else 20)
+                    print(f"[gemini] retrying in {delay:.1f}s ({attempt + 1}/{attempts}): {str(exc)[:140]}")
+                    await asyncio.sleep(delay)
                     continue
                 print(f"[gemini] complete error: {exc}")
                 if "429" in str(exc) or "RESOURCE_EXHAUSTED" in str(exc):
@@ -94,8 +114,10 @@ class GeminiProvider(LLMProvider):
                             sources.append({"title": web.title or "", "uri": web.uri, "domain": web.domain or ""})
                 return {"text": text, "sources": sources}
             except Exception as exc:  # pylint: disable=broad-except
-                if attempt == 0 and ("429" in str(exc) or "RESOURCE_EXHAUSTED" in str(exc)):
-                    await asyncio.sleep(6)
+                if self._transient(exc) and attempt < attempts - 1:
+                    delay = self._retry_delay(exc) or (8 if attempt == 0 else 20)
+                    print(f"[gemini] grounded retrying in {delay:.1f}s ({attempt + 1}/{attempts}): {str(exc)[:140]}")
+                    await asyncio.sleep(delay)
                     continue
                 print(f"[gemini] grounded error: {exc}")
                 if "429" in str(exc) or "RESOURCE_EXHAUSTED" in str(exc):

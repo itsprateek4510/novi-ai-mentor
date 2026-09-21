@@ -92,7 +92,10 @@ class NoviEngine:
 
     async def complete(self, prompt: str, system: str | None = None) -> str:
         if not self._use_primary():
-            return await self.fallback.complete(prompt, system=system)
+            try:
+                return await self.fallback.complete(prompt, system=system)
+            except LLMError:
+                return await self.primary.complete(prompt, system=system)
         try:
             return await self.primary.complete(prompt, system=system)
         except LLMError as exc:
@@ -101,7 +104,10 @@ class NoviEngine:
 
     async def complete_json(self, prompt: str, system: str | None = None) -> Any:
         if not self._use_primary():
-            return await self.fallback.complete_json(prompt, system=system)
+            try:
+                return await self.fallback.complete_json(prompt, system=system)
+            except LLMError:
+                return await self.primary.complete_json(prompt, system=system)
         try:
             return await self.primary.complete_json(prompt, system=system)
         except LLMError as exc:
@@ -112,7 +118,10 @@ class NoviEngine:
         """Web-search grounded completion (Gemini Google Search). Falls back to
         plain completion (no sources) when grounding is unavailable."""
         if not self._use_primary():
-            return await self.fallback.complete_grounded(prompt, system=system)
+            try:
+                return await self.fallback.complete_grounded(prompt, system=system)
+            except LLMError:
+                return await self.primary.complete_grounded(prompt, system=system)
         try:
             return await self.primary.complete_grounded(prompt, system=system)
         except LLMError as exc:

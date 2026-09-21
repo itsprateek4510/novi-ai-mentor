@@ -1,4 +1,5 @@
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -7,10 +8,25 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.router import api_router
+from app.core.database import Base, engine
 from app.core.config import PROJECT_ROOT, settings
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("novi")
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    # Idempotent: ensure every registered model (incl. onboarding_sessions) exists.
+    import app.models  # noqa: F401  (registers all tables on Base.metadata)
+
+    from app.db.run_migrations import check_critical_columns, run_migrations
+
+    Base.metadata.create_all(bind=engine)
+    run_migrations()
+    check_critical_columns()
+    yield
+
 
 FRONTEND_DIR = Path(settings.FRONTEND_DIR)
 
@@ -20,6 +36,7 @@ app = FastAPI(
     description="NOVI — The Operating System for Student Success",
     docs_url="/docs",
     openapi_url="/api/v1/openapi.json",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -31,6 +48,18 @@ app.add_middleware(
 )
 
 app.include_router(api_router)
+
+# Google OAuth callback must live at the exact (unversioned) redirect URI registered
+# in Google Cloud Console — e.g. http://localhost:8000/api/auth/google/callback.
+from app.api import google_auth  # noqa: E402
+
+app.include_router(google_auth.router, prefix="/api", include_in_schema=False)
+
+# Internal, service-to-service onboarding endpoints (called by the registered
+# LettA tools). Mounted at the unversioned root and kept out of the public docs.
+from app.routers.internal_onboarding import router as internal_onboarding_router  # noqa: E402
+
+app.include_router(internal_onboarding_router, include_in_schema=False)
 
 if FRONTEND_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR / "static")), name="static")

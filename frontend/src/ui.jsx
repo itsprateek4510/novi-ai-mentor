@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link } from "next/link";
 import { esc, ringColor } from "./api";
 
 /* ------------------------------------------------------------------ loader */
@@ -137,7 +137,7 @@ export function DnaBar({ c, section }) {
       <div className="card novi-box mb">
         <span className="novi-avatar">N</span>
         <span>Everything on this page personalises from your Career DNA.</span>
-        <Link to="/dna" className="small" style={{ color: "var(--accent)" }}>Set your direction now →</Link>
+        <Link href="/dna" className="small" style={{ color: "var(--accent)" }}>Set your direction now →</Link>
       </div>
     );
   }
@@ -149,7 +149,7 @@ export function DnaBar({ c, section }) {
     <div className="card novi-box mb">
       <div className="between">
         <h3 style={{ margin: 0 }}>Based on your Career DNA</h3>
-        <Link to="/dna" className="small" style={{ color: "var(--accent)" }}>View DNA →</Link>
+        <Link href="/dna" className="small" style={{ color: "var(--accent)" }}>View DNA →</Link>
       </div>
       <p className="small" style={{ marginTop: 8 }}>{DNA_NOTES[section] ? DNA_NOTES[section](c) : null}</p>
       {chips.length ? (

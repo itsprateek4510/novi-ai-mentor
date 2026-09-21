@@ -25,6 +25,8 @@ class User(Base):
     avatar: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(default=True, server_default="1")
     letta_agent_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    onboarding_step: Mapped[str] = mapped_column(String(50), nullable=False, default="name", server_default="name")
+    onboarding_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -32,6 +34,9 @@ class User(Base):
 
     conversations = relationship("Conversation", back_populates="user", cascade="all, delete-orphan")
     career_dna = relationship("CareerDNA", back_populates="user", uselist=False, cascade="all, delete-orphan")
+    onboarding = relationship(
+        "OnboardingSession", back_populates="user", uselist=False, cascade="all, delete-orphan"
+    )
     career_matches = relationship("CareerMatch", back_populates="user", cascade="all, delete-orphan")
     university_matches = relationship("UniversityMatch", back_populates="user", cascade="all, delete-orphan")
     goals = relationship("Goal", back_populates="user", cascade="all, delete-orphan")

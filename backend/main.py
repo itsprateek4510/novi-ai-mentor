@@ -33,7 +33,10 @@ app.add_middleware(
 )
 
 app.mount("/static", StaticFiles(directory="../frontend/static"), name="static")
-app.mount("/dist", StaticFiles(directory="../frontend/dist"), name="dist")
+
+_dist_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../frontend/dist"))
+if os.path.isdir(_dist_dir):
+    app.mount("/dist", StaticFiles(directory=_dist_dir), name="dist")
 
 letta_service = LettaService()
 gemini_service = GeminiService()
@@ -41,7 +44,13 @@ auth_service = AuthService()
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    return FileResponse("../frontend/dist/index.html")
+    index = os.path.join(_dist_dir, "index.html")
+    if os.path.exists(index):
+        return FileResponse(index)
+    return HTMLResponse(
+        "<h1>NOVI API</h1><p>Backend is running. The UI is served by the Next.js app — run "
+        "<code>npm run dev</code> in <code>frontend/</code> and open http://localhost:3000.</p>"
+    )
 
 @app.post("/api/auth/signup", response_model=UserResponse)
 async def signup(user: UserCreate, db: Session = Depends(get_db)):

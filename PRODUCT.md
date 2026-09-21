@@ -226,6 +226,7 @@ Test credentials: `student@novi.app` / `Novi@12345` · `prateekkushwaha868@gmail
 | Memory + agents | `backend/app/llm/{letta.py,memory.py}` |
 | AI engine | `backend/app/llm/engine.py` · `services/providers.py` |
 | Prompts (voice/UX) | `backend/app/llm/prompts.py` |
-| Feature services | `backend/app/services/{career_dna,careers,universities,roadmap,passport,checkins,dashboard,parents,onboarding}.py` |
+| Onboarding engine | `backend/app/routers/onboarding.py` · `app/onboarding/steps.py` (15 steps) |
+| Feature services | `backend/app/services/{career_dna,careers,universities,roadmap,passport,checkins,dashboard,parents,student_context}.py` |
 | API routers | `backend/app/api/` · router map in `api/router.py` |
-| Frontend | `frontend/index.html` · `frontend/static/{app.js,styles.css}` |
+| Frontend | `frontend/app/` (Next.js) · `frontend/src/views/` · `frontend/src/speech.js` (TTS) |
