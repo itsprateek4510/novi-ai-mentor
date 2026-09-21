@@ -264,9 +264,8 @@ by `backend/.env`:
 
 The **15-step conversational engine** (`app/routers/onboarding.py`, backed by the
 `ONBOARDING_STEPS` registry in `app/onboarding/steps.py`) is the only onboarding
-engine. The legacy 34-step flow engine (`app/api/onboarding.py` →
-`app/services/onboarding_flow.py`) was removed; all of its routes are now served
-by the new engine at `/api/v1/onboarding/*`:
+engine. The legacy 34-step flow engine was removed; all of its routes are now
+served by the new engine at `/api/v1/onboarding/*`:
 
 | Route                       | Purpose                                                        |
 |-----------------------------|----------------------------------------------------------------|

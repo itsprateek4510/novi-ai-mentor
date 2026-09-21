@@ -32,7 +32,7 @@ api_router.include_router(memory.router)
 
 # Onboarding: the 15-step conversational engine (app/routers/onboarding.py) is the
 # only onboarding engine. Its /state + /answer + /flow/* + /voice/* routes replace
-# the legacy flow engine (app/api/onboarding.py, removed) at /onboarding.
+# the legacy flow engine (removed) at /onboarding.
 from app.routers.onboarding import router as onboarding_flow_router
 
 api_router.include_router(onboarding_flow_router)
