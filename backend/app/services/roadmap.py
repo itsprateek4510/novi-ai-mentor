@@ -63,6 +63,12 @@ def create_goal(db: Session, user: User, data: GoalCreate) -> Goal:
         f"User set a goal: {goal.title} ({goal.category.value}).",
         ("roadmap", "goal"),
     )
+    try:
+        from app.services import m3_bridge
+
+        m3_bridge.sync_goal_to_m3(db, user, goal, commit=True)
+    except Exception as exc:
+        print(f"[roadmap] m3 goal sync failed: {exc}")
     return goal
 
 
@@ -104,6 +110,8 @@ def list_goals(db: Session, user: User) -> list[Goal]:
 
 
 def update_goal(db: Session, user: User, goal_id: int, data: GoalUpdate) -> Goal | None:
+    from app.services import m3_bridge
+
     goal = db.get(Goal, goal_id)
     if not goal or goal.user_id != user.id:
         return None
@@ -111,10 +119,34 @@ def update_goal(db: Session, user: User, goal_id: int, data: GoalUpdate) -> Goal
         goal.title = data.title
     if data.description is not None:
         goal.description = data.description
-    if data.status is not None and data.status in GoalStatus._value2member_map_:
-        goal.status = GoalStatus(data.status)
+
+    status = data.status
+    if status == "done":
+        goal.status = GoalStatus.COMPLETED
+    elif status == "cancelled":
+        goal.status = GoalStatus.PAUSED
+    elif status is not None and status in GoalStatus._value2member_map_:
+        goal.status = GoalStatus(status)
+
     db.commit()
     db.refresh(goal)
+
+    try:
+        m3_bridge.sync_goal_to_m3(db, user, goal, commit=True)
+        if status == "done":
+            m3_bridge.set_goal_roadmap_status(db, user, goal, "completed")
+            m3_goal = m3_bridge.m3_goal_for(db, user, goal)
+            if m3_goal is not None and m3_goal.status != "completed":
+                m3_goal.status = "completed"
+                db.commit()
+        elif status == "cancelled":
+            m3_bridge.set_goal_roadmap_status(db, user, goal, "abandoned")
+            for old in db.scalars(select(RoadmapItem).where(RoadmapItem.goal_id == goal.id)):
+                db.delete(old)
+            db.commit()
+    except Exception as exc:
+        print(f"[roadmap] m3 sync failed: {exc}")
+        db.rollback()
     return goal
 
 

@@ -1,7 +1,7 @@
 import uuid
 from datetime import date, datetime
 
-from sqlalchemy import CheckConstraint, Date, DateTime, ForeignKey, Index, String, Text, Uuid, func
+from sqlalchemy import CheckConstraint, Date, DateTime, ForeignKey, Index, Integer, String, Text, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base
@@ -30,6 +30,7 @@ class Goal(Base):
     student_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("m3_students.id", ondelete="CASCADE"), nullable=False
     )
+    legacy_goal_id: Mapped[int | None] = mapped_column(Integer, nullable=True, unique=True)
     goal_type: Mapped[str] = mapped_column(String(20), nullable=False)
     title: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
